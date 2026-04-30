@@ -812,6 +812,34 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 	case *flow.RunFlowStep:
 		fr.script.ExpandStep(step)
 		result = fr.executeRunFlow(s)
+
+	// App lifecycle steps - inject flow's appId if not specified.
+	// Mirrors executeStep so hooks (onFlowStart/onFlowComplete) and other nested
+	// invocations resolve the default appId the same way as top-level steps.
+	case *flow.LaunchAppStep:
+		if s.AppID == "" {
+			s.AppID = fr.flow.Config.EffectiveAppID()
+		}
+		fr.script.ExpandStep(step)
+		result = fr.driver.Execute(step)
+	case *flow.StopAppStep:
+		if s.AppID == "" {
+			s.AppID = fr.flow.Config.EffectiveAppID()
+		}
+		fr.script.ExpandStep(step)
+		result = fr.driver.Execute(step)
+	case *flow.KillAppStep:
+		if s.AppID == "" {
+			s.AppID = fr.flow.Config.EffectiveAppID()
+		}
+		fr.script.ExpandStep(step)
+		result = fr.driver.Execute(step)
+	case *flow.ClearStateStep:
+		if s.AppID == "" {
+			s.AppID = fr.flow.Config.EffectiveAppID()
+		}
+		fr.script.ExpandStep(step)
+		result = fr.driver.Execute(step)
 	case *flow.TakeScreenshotStep:
 		fr.script.ExpandStep(step)
 		result = fr.driver.Execute(step)
