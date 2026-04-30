@@ -605,10 +605,9 @@ func (d *Driver) copyTextFrom(step *flow.CopyTextFromStep) *core.CommandResult {
 		return errorResult(fmt.Errorf("element has no text"), "")
 	}
 
-	if err := d.client.SetClipboard(text); err != nil {
-		return errorResult(err, "Failed to set clipboard")
-	}
-
+	// Don't push to device clipboard — Appium 3.x UIA2 returns 404 for
+	// /appium/device/set_clipboard, and the executor already keeps the
+	// copied text in memory (script.SetCopiedText) for pasteText to reuse.
 	result := successResult(fmt.Sprintf("Copied text: '%s' (len=%d)", text, len(text)), info)
 	result.Data = text
 	return result
