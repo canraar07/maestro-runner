@@ -146,14 +146,34 @@ window.__maestro = {
           try { pushAll(docs[d].querySelectorAll(selectorValue)); } catch (e) {}
         }
         break;
-      case 'id':
-        for (var d = 0; d < docs.length; d++) {
-          try {
-            var el = docs[d].getElementById(selectorValue);
-            if (el) results.push(el);
-          } catch (e) {}
+      case 'id': {
+        // Mirror the Go-side findByID cascade: #id → [data-testid] → [id*=]
+        // → [name=] → [aria-label=]. First strategy that hits in any frame wins.
+        var idCascade = [
+          function(doc) {
+            try { return doc.getElementById(selectorValue); } catch (e) { return null; }
+          },
+          function(doc) {
+            try { return doc.querySelector('[data-testid="' + escaped + '"]'); } catch (e) { return null; }
+          },
+          function(doc) {
+            try { return doc.querySelector('[id*="' + escaped + '"]'); } catch (e) { return null; }
+          },
+          function(doc) {
+            try { return doc.querySelector('[name="' + escaped + '"]'); } catch (e) { return null; }
+          },
+          function(doc) {
+            try { return doc.querySelector('[aria-label="' + escaped + '"]'); } catch (e) { return null; }
+          },
+        ];
+        for (var s = 0; s < idCascade.length && results.length === 0; s++) {
+          for (var d = 0; d < docs.length; d++) {
+            var el = idCascade[s](docs[d]);
+            if (el) { results.push(el); break; }
+          }
         }
         break;
+      }
       case 'testId':
         for (var d = 0; d < docs.length; d++) {
           try { pushAll(docs[d].querySelectorAll('[data-testid="' + escaped + '"]')); } catch (e) {}

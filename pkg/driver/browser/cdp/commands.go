@@ -122,7 +122,15 @@ func (d *Driver) tapOnPoint(step *flow.TapOnPointStep) *core.CommandResult {
 }
 
 // assertVisible asserts that an element is visible.
-// Uses the JS helper's visibility check for consistency with waitUntil.
+// Uses the JS helper's visibility check for plain selectors (RAF-based polling
+// in the browser, faster than CDP round-trips). Falls back to the Go-side
+// finder for selectors the JS fast path can't handle correctly:
+//   - state filters (Enabled / Checked / Focused / Selected) — the Go finder
+//     applies these via matchesStateFilters; the JS waitForVisible path does not.
+//   - Nth > 0 — the Go finder respects index/out-of-range; the JS path just
+//     checks "any visible".
+//   - Role selectors — implicit ARIA roles (e.g. <a> as "link") need the CDP
+//     accessibility tree, which only the Go path uses.
 func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult {
 	timeoutMs := step.TimeoutMs
 	if timeoutMs == 0 {
@@ -130,8 +138,12 @@ func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult
 	}
 	desc := step.Selector.DescribeQuoted()
 
+	// Track unsupported-field warnings even when we take the JS fast path
+	// (findElement records them but the fast path bypasses findElement).
+	d.recordUnsupportedFields(&step.Selector)
+
 	selectorType, selectorValue := jsSelectorTypeValue(step.Selector)
-	if selectorType != "" {
+	if selectorType != "" && !needsGoFinder(step.Selector) {
 		// Use RAF-based JS polling: consistent with waitUntil visibility checks
 		result, err := d.page.Timeout(time.Duration(timeoutMs+1000) * time.Millisecond).Evaluate(
 			rod.Eval(`(type, value, timeout) => window.__maestro.waitForVisible(type, value, timeout)`,
@@ -161,6 +173,36 @@ func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult
 		)
 	}
 	return successResult(fmt.Sprintf("Element %s is visible", desc), info)
+}
+
+// needsGoFinder reports whether a selector has features the JS fast-path
+// (waitForVisible) does not implement, so the caller must route through the
+// Go-side findElement instead. Keep this in sync with the Go finder's
+// capabilities.
+func needsGoFinder(sel flow.Selector) bool {
+	if sel.Enabled != nil || sel.Checked != nil || sel.Focused != nil || sel.Selected != nil {
+		return true
+	}
+	if sel.Nth > 0 {
+		return true
+	}
+	if sel.Role != "" {
+		return true
+	}
+	return false
+}
+
+// recordUnsupportedFields registers any web-unsupported selector fields in
+// d.warnedFields so consumers (and tests) can detect them, and logs each new
+// field once. Callers that bypass findElement still need to call this.
+func (d *Driver) recordUnsupportedFields(sel *flow.Selector) {
+	unsupported := flow.CheckUnsupportedFields(sel, "web")
+	for _, field := range unsupported {
+		if !d.warnedFields[field] {
+			d.warnedFields[field] = true
+			log.Printf("[browser] warning: %q is not supported on web — will be ignored", field)
+		}
+	}
 }
 
 // assertNotVisible asserts that an element is NOT visible.

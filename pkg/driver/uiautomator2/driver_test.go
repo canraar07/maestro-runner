@@ -1579,15 +1579,12 @@ func TestInputTextNoSelector(t *testing.T) {
 }
 
 func TestInputTextNoSelectorError(t *testing.T) {
+	// No-selector inputText routes through the W3C /actions endpoint
+	// (SendKeyActions). A 500 there should surface as a failed result.
 	server := setupMockServer(t, map[string]func(w http.ResponseWriter, r *http.Request){
-		"GET /element/active": func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, map[string]interface{}{
-				"value": map[string]string{"ELEMENT": "active-elem"},
-			})
-		},
-		"POST /element/active-elem/value": func(w http.ResponseWriter, r *http.Request) {
+		"POST /actions": func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
-			writeJSON(w, map[string]interface{}{"value": "send keys failed"})
+			writeJSON(w, map[string]interface{}{"value": "actions failed"})
 		},
 	})
 	defer server.Close()
@@ -1599,7 +1596,7 @@ func TestInputTextNoSelectorError(t *testing.T) {
 	result := driver.Execute(step)
 
 	if result.Success {
-		t.Error("expected failure on sendKeys error")
+		t.Error("expected failure on key actions error")
 	}
 }
 

@@ -16,15 +16,7 @@ import (
 // findElement finds an element using the selector with polling until timeout.
 // Uses Rod's clone-based timeout: creates a new page object with deadline.
 func (d *Driver) findElement(sel flow.Selector, optional bool, stepTimeoutMs int) (*rod.Element, *core.ElementInfo, error) {
-	// Warn about unsupported selector fields (once per field)
-	if unsupported := flow.CheckUnsupportedFields(&sel, "web"); len(unsupported) > 0 {
-		for _, field := range unsupported {
-			if !d.warnedFields[field] {
-				d.warnedFields[field] = true
-				log.Printf("[browser] warning: %q is not supported on web — will be ignored", field)
-			}
-		}
-	}
+	d.recordUnsupportedFields(&sel)
 
 	timeout := d.calculateTimeout(optional, stepTimeoutMs)
 	deadline := time.Now().Add(timeout)

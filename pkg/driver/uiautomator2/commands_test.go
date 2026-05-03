@@ -1769,24 +1769,12 @@ func TestInputTextWithUnicodeWarning(t *testing.T) {
 }
 
 func TestInputTextNoSelectorNoActiveElement(t *testing.T) {
-	// No selector, no active element, no focused element -> should fail
+	// No selector — inputText now sends W3C key actions directly to the OS-focused
+	// target. When the W3C /actions endpoint fails, the call should fail too.
 	server := setupMockServer(t, map[string]func(w http.ResponseWriter, r *http.Request){
-		"GET /element/active": func(w http.ResponseWriter, r *http.Request) {
-			// Return empty element ID (no active element)
-			writeJSON(w, map[string]interface{}{
-				"value": map[string]string{"ELEMENT": ""},
-			})
-		},
-		"POST /element": func(w http.ResponseWriter, r *http.Request) {
-			// Focused element search also fails
-			writeJSON(w, map[string]interface{}{
-				"value": map[string]string{"ELEMENT": ""},
-			})
-		},
-		"GET /source": func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, map[string]interface{}{
-				"value": `<hierarchy><node text="label" bounds="[0,0][100,100]"/></hierarchy>`,
-			})
+		"POST /actions": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]interface{}{"value": "no focused element"})
 		},
 	})
 	defer server.Close()
@@ -1799,7 +1787,7 @@ func TestInputTextNoSelectorNoActiveElement(t *testing.T) {
 	result := driver.Execute(step)
 
 	if result.Success {
-		t.Error("expected failure when no focused element found")
+		t.Error("expected failure when key actions endpoint errors")
 	}
 }
 
