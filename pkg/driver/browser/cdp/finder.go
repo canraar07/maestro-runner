@@ -105,18 +105,18 @@ func (d *Driver) findElementOnce(sel flow.Selector) (*rod.Element, *core.Element
 // findByCSS finds an element by CSS selector.
 // Falls back to a same-origin-iframe walk when the top-frame query misses.
 func (d *Driver) findByCSS(sel flow.Selector) (*rod.Element, *core.ElementInfo, error) {
-	if sel.Nth > 0 {
+	if sel.EffectiveNth() > 0 {
 		p := d.page.Timeout(2 * time.Second)
 		elems, err := p.Elements(sel.CSS)
 		if err != nil {
 			return nil, nil, fmt.Errorf("CSS selector '%s' not found: %w", sel.CSS, err)
 		}
-		if sel.Nth >= len(elems) {
-			return nil, nil, fmt.Errorf("CSS selector '%s': nth=%d but only %d elements found", sel.CSS, sel.Nth, len(elems))
+		if sel.EffectiveNth() >= len(elems) {
+			return nil, nil, fmt.Errorf("CSS selector '%s': nth=%d but only %d elements found", sel.CSS, sel.EffectiveNth(), len(elems))
 		}
-		elem := elems[sel.Nth]
+		elem := elems[sel.EffectiveNth()]
 		if !d.matchesStateFilters(elem, sel) {
-			return nil, nil, fmt.Errorf("CSS selector '%s' found (nth=%d) but state filters don't match", sel.CSS, sel.Nth)
+			return nil, nil, fmt.Errorf("CSS selector '%s' found (nth=%d) but state filters don't match", sel.CSS, sel.EffectiveNth())
 		}
 		info := d.elementInfo(elem)
 		return elem, info, nil
@@ -330,17 +330,17 @@ func (d *Driver) findByTextRegex(sel flow.Selector) (*rod.Element, *core.Element
 func (d *Driver) findByCSSWithNth(css string, sel flow.Selector, desc string) (*rod.Element, *core.ElementInfo, error) {
 	p := d.page.Sleeper(rod.NotFoundSleeper)
 
-	if sel.Nth > 0 {
+	if sel.EffectiveNth() > 0 {
 		elems, err := p.Elements(css)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s not found: %w", desc, err)
 		}
-		if sel.Nth >= len(elems) {
-			return nil, nil, fmt.Errorf("%s: nth=%d but only %d elements found", desc, sel.Nth, len(elems))
+		if sel.EffectiveNth() >= len(elems) {
+			return nil, nil, fmt.Errorf("%s: nth=%d but only %d elements found", desc, sel.EffectiveNth(), len(elems))
 		}
-		elem := elems[sel.Nth]
+		elem := elems[sel.EffectiveNth()]
 		if !d.matchesStateFilters(elem, sel) {
-			return nil, nil, fmt.Errorf("%s found (nth=%d) but state filters don't match", desc, sel.Nth)
+			return nil, nil, fmt.Errorf("%s found (nth=%d) but state filters don't match", desc, sel.EffectiveNth())
 		}
 		info := d.elementInfo(elem)
 		return elem, info, nil
@@ -378,7 +378,7 @@ func (d *Driver) resolveAXNodes(nodes []*proto.AccessibilityAXNode, sel flow.Sel
 		}
 
 		// Apply nth filter
-		if sel.Nth > 0 && visibleIdx < sel.Nth {
+		if sel.EffectiveNth() > 0 && visibleIdx < sel.EffectiveNth() {
 			visibleIdx++
 			continue
 		}

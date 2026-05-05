@@ -183,7 +183,7 @@ func needsGoFinder(sel flow.Selector) bool {
 	if sel.Enabled != nil || sel.Checked != nil || sel.Focused != nil || sel.Selected != nil {
 		return true
 	}
-	if sel.Nth > 0 {
+	if sel.EffectiveNth() > 0 {
 		return true
 	}
 	if sel.Role != "" {
