@@ -3,7 +3,9 @@ package wda
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -879,35 +881,124 @@ func (d *Driver) clearState(step *flow.ClearStateStep) *core.CommandResult {
 }
 
 // clearAppState uninstalls and reinstalls an app to clear its state.
-// Requires --app-file for both simulators and real devices.
-// On simulators, uses simctl. On physical devices, uses xcrun devicectl.
+//   - Simulator: auto-discovers the installed .app via `simctl get_app_container`
+//     when --app-file isn't provided (or when it points inside the live sim
+//     container, which would be deleted by the uninstall step). Matches
+//     Maestro CLI's auto-stage behavior so flows like `- clearState` work
+//     without any extra flags.
+//   - Real device: --app-file is still required (Apple seals the .app on
+//     device, no public API to extract it back to the host).
 func (d *Driver) clearAppState(bundleID string) *core.CommandResult {
-	if d.appFile == "" {
-		return errorResult(fmt.Errorf("clearState on iOS requires --app-file for reinstall"),
-			"clearState on iOS requires --app-file to reinstall the app after uninstalling\n"+
-				"Usage: maestro-runner --app-file <path-to-ipa-or-app> --platform ios test <flow-files>")
-	}
-
 	if d.info.IsSimulator {
 		return d.clearAppStateSimulator(bundleID)
+	}
+	if d.appFile == "" {
+		return errorResult(fmt.Errorf("clearState on real iOS devices requires --app-file"),
+			"clearState on real iOS devices requires --app-file — the installed bundle "+
+				"isn't reachable from the host. On simulators no flag is needed.\n"+
+				"Usage: maestro-runner --app-file <path-to-ipa-or-app> --platform ios test <flow-files>")
 	}
 	return d.clearAppStateDevice(bundleID)
 }
 
 func (d *Driver) clearAppStateSimulator(bundleID string) *core.CommandResult {
+	appFile, cleanup, err := d.resolveSimAppFile(bundleID)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("clearState: %v", err))
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
 	cmd := exec.Command("xcrun", "simctl", "uninstall", d.udid, bundleID)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return errorResult(fmt.Errorf("simctl uninstall failed: %w: %s", err, string(output)),
 			"Failed to uninstall app on simulator")
 	}
 
-	cmd = exec.Command("xcrun", "simctl", "install", d.udid, d.appFile)
+	cmd = exec.Command("xcrun", "simctl", "install", d.udid, appFile)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return errorResult(fmt.Errorf("simctl install failed: %w: %s", err, string(output)),
 			"Failed to reinstall app on simulator")
 	}
 
 	return successResult(fmt.Sprintf("Cleared state for %s (uninstall+reinstall)", bundleID), nil)
+}
+
+// resolveSimAppFile returns the .app path to feed into `simctl install` after
+// uninstall, plus an optional cleanup closure for any temp staging directory.
+//
+// The selection logic:
+//  1. --app-file points to an external location (not inside this sim's
+//     container) → use it as-is, no staging. Same speed as before.
+//  2. --app-file is empty OR points inside /CoreSimulator/Devices/<udid>/ →
+//     discover the installed .app via `simctl get_app_container <udid> <id>`
+//     and stage a copy to a temp dir. The uninstall step would otherwise
+//     delete the path before install reads it.
+//
+// Staging uses APFS clone (`cp -c`) — sim container and `os.MkdirTemp` both
+// land on the same APFS volume, so the copy is effectively zero-cost. Falls
+// back to `cp -R` if clone isn't supported.
+func (d *Driver) resolveSimAppFile(bundleID string) (string, func(), error) {
+	containerMarker := fmt.Sprintf("/CoreSimulator/Devices/%s/", d.udid)
+	pointsAtLiveContainer := d.appFile != "" && strings.Contains(d.appFile, containerMarker)
+
+	if d.appFile != "" && !pointsAtLiveContainer {
+		return d.appFile, nil, nil
+	}
+
+	installed, err := d.simulatorInstalledAppPath(bundleID)
+	if err != nil {
+		if d.appFile == "" {
+			return "", nil, fmt.Errorf("could not locate installed app for %s on simulator: %w (provide --app-file or install the app first)", bundleID, err)
+		}
+		// Fall back to the user-supplied --app-file even though it looked
+		// like a container path; let `simctl install` produce the actual
+		// error if it really is unreachable.
+		return d.appFile, nil, nil
+	}
+
+	tmpDir, err := os.MkdirTemp("", "maestro-runner-clearstate-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("create temp dir for clearState staging: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(tmpDir) }
+
+	staged := filepath.Join(tmpDir, filepath.Base(installed))
+	if err := stageAppBundle(installed, staged); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("stage app bundle for clearState: %w", err)
+	}
+	return staged, cleanup, nil
+}
+
+// simulatorInstalledAppPath returns the .app bundle path for the installed
+// app, via `xcrun simctl get_app_container <udid> <bundleID>`. Returns an
+// error when the app isn't installed or simctl fails.
+func (d *Driver) simulatorInstalledAppPath(bundleID string) (string, error) {
+	cmd := exec.Command("xcrun", "simctl", "get_app_container", d.udid, bundleID)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("simctl get_app_container: %w", err)
+	}
+	path := strings.TrimSpace(string(out))
+	if path == "" {
+		return "", fmt.Errorf("simctl returned empty container path")
+	}
+	return path, nil
+}
+
+// stageAppBundle copies a .app bundle from src to dst, preferring APFS
+// clone-on-write (cp -c) for near-zero-cost staging on modern macOS. Falls
+// back to a plain recursive copy if clone isn't supported (e.g. cross-volume).
+func stageAppBundle(src, dst string) error {
+	if err := exec.Command("cp", "-c", "-R", src, dst).Run(); err == nil {
+		return nil
+	}
+	if out, err := exec.Command("cp", "-R", src, dst).CombinedOutput(); err != nil {
+		return fmt.Errorf("cp -R %s %s: %w: %s", src, dst, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // clearKeychain handles the standalone clearKeychain step. Unsupported on

@@ -772,8 +772,14 @@ func executeTest(cfg *RunConfig) error {
 				"Usage: maestro-runner --platform ios --team-id <APPLE_TEAM_ID> test <flow-files>\n" +
 				"Note: --team-id is not required for simulators")
 		}
-		if cfg.AppFile == "" && flowsUseClearState(flows) {
-			return fmt.Errorf("clearState on iOS requires --app-file to reinstall the app after uninstalling\n" +
+		// clearState on iOS uninstalls + reinstalls. On real devices the host
+		// can't reach the installed .app bundle, so --app-file is mandatory.
+		// On simulators the runner auto-discovers the installed bundle via
+		// `simctl get_app_container` and stages a copy before uninstall, so
+		// --app-file is optional (matches Maestro CLI's behavior).
+		if cfg.AppFile == "" && !isSimTarget && flowsUseClearState(flows) {
+			return fmt.Errorf("clearState on real iOS devices requires --app-file — " +
+				"the installed bundle isn't reachable from the host. On simulators no flag is needed.\n" +
 				"Usage: maestro-runner --app-file <path-to-ipa-or-app> --platform ios test <flow-files>")
 		}
 	}
