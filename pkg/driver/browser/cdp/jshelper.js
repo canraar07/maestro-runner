@@ -1,41 +1,62 @@
 window.__maestro = {
-  // Tracks how many cross-origin iframes _collectDocs skipped on the most
+  // Tracks how many cross-origin iframes _collectRoots skipped on the most
   // recent walk. Read by the Go side to surface a clear error when a query
   // misses (so users know the cause is OOPIF, not a typo'd selector).
   _lastCrossOriginSkips: 0,
 
-  // Collect the top document plus every same-origin iframe document reachable
-  // from it. Cross-origin iframes throw on contentDocument access — we swallow
-  // those errors so the query continues across the docs we *can* see, and
-  // count them so the caller can warn.
-  _collectDocs: function() {
-    var docs = [document];
+  // Collect every same-origin DOM root reachable from the top frame:
+  //   * the top document
+  //   * same-origin iframe / frame contentDocuments (recursively)
+  //   * any open shadowRoot (mode: "open") attached to any element in any
+  //     of the above (recursively)
+  //
+  // Document and ShadowRoot share the relevant DOM API surface
+  // (querySelectorAll / getElementById), so callers can treat the returned
+  // list uniformly.
+  //
+  // Cross-origin iframes throw on contentDocument access; we swallow and
+  // count them so the caller can warn. Closed shadow roots
+  // (`mode: "closed"`) return null from `el.shadowRoot` and are not
+  // detectable from outside — same constraint Maestro CLI has, no fix
+  // possible without privileged WebDriver access.
+  _collectRoots: function() {
+    var roots = [document];
     var skipped = 0;
-    function walk(doc) {
-      var frames;
-      try { frames = doc.querySelectorAll('iframe, frame'); } catch (e) { return; }
-      for (var i = 0; i < frames.length; i++) {
-        var inner = null;
-        try { inner = frames[i].contentDocument; } catch (e) { skipped++; continue; }
-        if (inner === null) {
-          // Same-origin sandboxed iframe (sandbox without allow-same-origin)
-          // also returns null; treat as skipped so the user gets feedback.
-          skipped++;
+    function walk(root) {
+      var elements;
+      try { elements = root.querySelectorAll('*'); } catch (e) { return; }
+      for (var i = 0; i < elements.length; i++) {
+        var el = elements[i];
+        var tag = el.tagName;
+        if (tag === 'IFRAME' || tag === 'FRAME') {
+          var inner = null;
+          try { inner = el.contentDocument; } catch (e) { skipped++; continue; }
+          if (inner === null) {
+            // cross-origin OR sandboxed iframe (sandbox without
+            // allow-same-origin) returns null
+            skipped++;
+            continue;
+          }
+          if (roots.indexOf(inner) === -1) {
+            roots.push(inner);
+            walk(inner);
+          }
           continue;
         }
-        if (docs.indexOf(inner) === -1) {
-          docs.push(inner);
-          walk(inner);
+        // Open shadow root attached to this element — descend
+        if (el.shadowRoot && roots.indexOf(el.shadowRoot) === -1) {
+          roots.push(el.shadowRoot);
+          walk(el.shadowRoot);
         }
       }
     }
     walk(document);
     this._lastCrossOriginSkips = skipped;
-    return docs;
+    return roots;
   },
 
   // Returns the number of cross-origin / sandboxed frames skipped during the
-  // most recent _collectDocs pass. Used by the Go finders to enrich
+  // most recent _collectRoots pass. Used by the Go finders to enrich
   // not-found error messages.
   getLastCrossOriginSkips: function() {
     return this._lastCrossOriginSkips || 0;
@@ -43,7 +64,7 @@ window.__maestro = {
 
   findByText: function(text) {
     var lower = text.toLowerCase();
-    var docs = this._collectDocs();
+    var docs = this._collectRoots();
     var best = null, bestDepth = -1;
     for (var d = 0; d < docs.length; d++) {
       var all;
@@ -75,7 +96,7 @@ window.__maestro = {
   // Find first element matching a CSS selector across same-origin frames.
   // Used by Go finders as a fallback when the top-frame Rod lookup fails.
   findByCSSAcrossFrames: function(selector) {
-    var docs = this._collectDocs();
+    var docs = this._collectRoots();
     for (var d = 0; d < docs.length; d++) {
       try {
         var el = docs[d].querySelector(selector);
@@ -133,7 +154,7 @@ window.__maestro = {
 
   // Find all elements matching a selector across same-origin docs.
   _findMatchingElements: function(selectorType, selectorValue) {
-    var docs = this._collectDocs();
+    var docs = this._collectRoots();
     var results = [];
     function pushAll(nodes) {
       for (var i = 0; i < nodes.length; i++) results.push(nodes[i]);
