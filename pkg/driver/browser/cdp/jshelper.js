@@ -169,11 +169,27 @@ window.__maestro = {
   },
 
   // Visibility check: returns true if element is visible in the page.
+  //
+  // For iframe-nested elements, additionally requires that the element's
+  // bounding rect intersects every ancestor iframe's content viewport. An
+  // element scrolled or clipped outside its iframe is reported as not
+  // visible — matching what a user would see, and unblocking
+  // scrollUntilVisible's iframe-internal scrollIntoView path (which relies
+  // on this predicate to know when to stop scrolling).
+  //
+  // Top-frame "below-the-fold" elements are NOT rejected here. That matches
+  // pre-existing behaviour (and Maestro CLI semantics): visibility is about
+  // whether an element is rendered, not whether it currently sits inside
+  // the visible portion of the top viewport.
   _isElementVisible: function(el) {
     if (!el || !el.isConnected) return false;
+    // Use element's own window — getComputedStyle from a different window
+    // may return null for cross-document elements.
+    var ownerWin = (el.ownerDocument && el.ownerDocument.defaultView) || window;
     // Check offsetParent (null means display:none, except for body/html/fixed)
     if (el.offsetParent === null) {
-      var style = window.getComputedStyle(el);
+      var style = ownerWin.getComputedStyle(el);
+      if (!style) return false;
       if (style.display === 'none') return false;
       if (style.visibility === 'hidden') return false;
       // Fixed/sticky elements have null offsetParent but can be visible
@@ -185,8 +201,50 @@ window.__maestro = {
     }
     var rect = el.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) return false;
-    var style = window.getComputedStyle(el);
-    if (style.visibility === 'hidden' || style.opacity === '0') return false;
+    var style2 = ownerWin.getComputedStyle(el);
+    if (style2 && (style2.visibility === 'hidden' || style2.opacity === '0')) return false;
+    if (this._isInIframe(el)) {
+      return this._intersectsIframeChain(el, rect);
+    }
+    return true;
+  },
+
+  // _intersectsIframeChain: walk the iframe ancestor chain and verify the
+  // element's rect intersects each iframe's content viewport (innerWidth ×
+  // innerHeight of the iframe's contentWindow). Returns false on the first
+  // empty intersection, true once the top frame is reached.
+  //
+  // After each successful intersection, the surviving rect is translated to
+  // the parent document's viewport coordinates using the iframe element's
+  // box plus its content-area inset (mirroring topFrameClickPoint).
+  // Transformed iframe ancestors short-circuit to true — same bail
+  // Playwright takes (we follow that decision rather than computing through
+  // DOMMatrix), and consistent with the tap path.
+  _intersectsIframeChain: function(el, rect) {
+    var left = rect.left, top = rect.top, right = rect.right, bottom = rect.bottom;
+    var doc = el.ownerDocument;
+    while (doc && doc.defaultView) {
+      var w = doc.defaultView;
+      var iframe;
+      try { iframe = w.frameElement; } catch (e) { return true; }
+      if (!iframe) return true; // reached top frame
+      var vw, vh;
+      try {
+        vw = w.innerWidth || (doc.documentElement && doc.documentElement.clientWidth) || 0;
+        vh = w.innerHeight || (doc.documentElement && doc.documentElement.clientHeight) || 0;
+      } catch (e) { return true; }
+      var ix1 = Math.max(0, left), iy1 = Math.max(0, top);
+      var ix2 = Math.min(vw, right), iy2 = Math.min(vh, bottom);
+      if (ix2 <= ix1 || iy2 <= iy1) return false;
+      var style = this._describeIFrameStyle(iframe);
+      if (typeof style === 'string') return true; // transformed/notconnected — bail
+      var box = iframe.getBoundingClientRect();
+      left   = box.left + style.left + ix1;
+      top    = box.top  + style.top  + iy1;
+      right  = box.left + style.left + ix2;
+      bottom = box.top  + style.top  + iy2;
+      doc = iframe.ownerDocument;
+    }
     return true;
   },
 

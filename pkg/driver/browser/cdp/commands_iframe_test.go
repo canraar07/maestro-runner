@@ -367,19 +367,139 @@ func TestLongPressOnCrossRoot_Iframe(t *testing.T) {
 	}
 }
 
-// scrollUntilVisible across iframe boundaries is left untested at this
-// commit. The runtime fix in commands.go (use Element.scrollIntoView() for
-// iframe-internal targets instead of top-frame Mouse.Scroll) is correct in
-// principle, but the loop's exit condition depends on
-// `_isElementVisible` (jshelper.js) returning false until the element is
-// actually in the viewport. That helper currently does intrinsic-only
-// checks (offsetParent, computed style, getBoundingClientRect with
-// non-zero dimensions) and does NOT intersect with iframe clipping — so an
-// iframe-clipped element reports "visible" and scrollUntilVisible exits on
-// iteration 0 without ever invoking the new scrollIntoView path.
+// === Iframe-clipping in visibility check (B6 / PLAN-maestro-upstream-parity) ===
+// The visibility helper used to do intrinsic-only checks (computed style +
+// getBoundingClientRect dimensions) and reported elements scrolled outside
+// their iframe's content viewport as "visible." That false-positive made
+// scrollUntilVisible's loop exit on iteration 0 and never invoke the new
+// iframe-internal scrollIntoView branch (B5). It also caused waitForVisible
+// / assertVisible to incorrectly pass on iframe-clipped elements.
 //
-// Fixing the visibility check is its own task (intersect element rect with
-// each ancestor iframe's content-area rect on the top frame); that work is
-// tracked in PLAN-maestro-upstream-parity.md alongside the rest of the
-// Tier 1 follow-ups. Once it lands, the cross-root scrollIntoView branch
-// becomes reachable and a behavioural test can verify scrollTop advancement.
+// The fix walks the iframe ancestor chain and intersects the element's rect
+// against each ancestor iframe's content viewport. Top-frame "below the
+// fold" elements remain visible (matches Maestro CLI semantics and current
+// top-frame behaviour); only iframe clipping is added.
+
+// iframePageWithScrolledOutButton: iframe-nested button positioned far
+// below the iframe's content viewport. The iframe is fixed at 300×200 and
+// the button sits at iframe-local Y ≈ 5000 (above a tall spacer), so it
+// only enters the viewport after the iframe content scrolls down.
+//
+// Used by both the unit-level visibility test and the scrollUntilVisible
+// end-to-end test.
+func iframePageWithScrolledOutButton() string {
+	return `<!DOCTYPE html>
+<html><body>
+<h1>HEADER</h1>
+<iframe id="f" title="inner" style="width:300px;height:200px;border:1px solid #888"
+ srcdoc='<!DOCTYPE html><html><body style="margin:0;padding:0">
+<div style="height:5000px;background:linear-gradient(#fff,#eee);"></div>
+<button id="b" style="display:block;margin:8px;width:120px;height:40px">DoIt</button>
+<div style="height:1000px"></div>
+<script>
+document.getElementById("b").addEventListener("click", function() { document.title = "clicked-scrolled"; });
+</script>
+</body></html>'></iframe>
+</body></html>`
+}
+
+// TestIsElementVisible_IframeClipped: direct unit-level check on the
+// visibility helper. Without B6 the call returns true even though the
+// button is scrolled out of view inside the iframe; with B6 it correctly
+// returns false until the iframe scrolls the button into its viewport.
+func TestIsElementVisible_IframeClipped(t *testing.T) {
+	ts := newIframeTestServer(iframePageWithScrolledOutButton())
+	defer ts.Close()
+	d := newTestDriver(t, ts.URL)
+	defer d.Close()
+
+	// Pre-scroll: button is 5000px down inside iframe; iframe scrollTop=0.
+	visBefore, err := d.page.Eval(`() => {
+		var f = document.getElementById('f');
+		var b = f.contentDocument.getElementById('b');
+		return window.__maestro._isElementVisible(b);
+	}`)
+	if err != nil {
+		t.Fatalf("eval pre-scroll visibility: %v", err)
+	}
+	if visBefore.Value.Bool() {
+		t.Fatalf("expected iframe-clipped button to report _isElementVisible=false, got true")
+	}
+
+	// Scroll iframe content so the button enters its content viewport.
+	if _, err := d.page.Eval(`() => {
+		var f = document.getElementById('f');
+		var b = f.contentDocument.getElementById('b');
+		b.scrollIntoView({block: 'center', behavior: 'instant'});
+	}`); err != nil {
+		t.Fatalf("scrollIntoView eval: %v", err)
+	}
+
+	visAfter, err := d.page.Eval(`() => {
+		var f = document.getElementById('f');
+		var b = f.contentDocument.getElementById('b');
+		return window.__maestro._isElementVisible(b);
+	}`)
+	if err != nil {
+		t.Fatalf("eval post-scroll visibility: %v", err)
+	}
+	if !visAfter.Value.Bool() {
+		t.Fatalf("expected scrolled-into-view button to report _isElementVisible=true, got false")
+	}
+}
+
+// TestScrollUntilVisible_IframeClipped: end-to-end exercise of the B5 +
+// B6 combination. Before B6, scrollUntilVisible exited on iteration 0
+// because info.Visible was already true (false positive) and the iframe
+// content was never scrolled. After B6 the visibility check returns false
+// until B5's scrollIntoView path actually advances the iframe's scroll
+// position.
+func TestScrollUntilVisible_IframeClipped(t *testing.T) {
+	ts := newIframeTestServer(iframePageWithScrolledOutButton())
+	defer ts.Close()
+	d := newTestDriver(t, ts.URL)
+	defer d.Close()
+
+	// Sanity: iframe scrollTop should be 0 before scrollUntilVisible runs.
+	pre, err := d.page.Eval(`() => {
+		var f = document.getElementById('f');
+		return f.contentDocument.documentElement.scrollTop ||
+		       (f.contentDocument.body && f.contentDocument.body.scrollTop) || 0;
+	}`)
+	if err != nil {
+		t.Fatalf("eval pre scrollTop: %v", err)
+	}
+	if pre.Value.Num() != 0 {
+		t.Fatalf("expected iframe scrollTop=0 pre-test, got %v", pre.Value.Num())
+	}
+
+	res := d.Execute(&flow.ScrollUntilVisibleStep{
+		Element:   flow.Selector{Text: "DoIt"},
+		Direction: "down",
+	})
+	if !res.Success {
+		t.Fatalf("scrollUntilVisible (iframe-clipped) failed: %s", res.Message)
+	}
+
+	// After scrollUntilVisible, iframe scrollTop must have advanced — this
+	// is the regression guard. Pre-fix it stayed at 0 because the visibility
+	// false-positive let the loop exit on iteration 0.
+	post, err := d.page.Eval(`() => {
+		var f = document.getElementById('f');
+		return f.contentDocument.documentElement.scrollTop ||
+		       (f.contentDocument.body && f.contentDocument.body.scrollTop) || 0;
+	}`)
+	if err != nil {
+		t.Fatalf("eval post scrollTop: %v", err)
+	}
+	if post.Value.Num() <= 0 {
+		t.Errorf("expected iframe scrollTop>0 after scrollUntilVisible, got %v", post.Value.Num())
+	}
+
+	// And the button is reported visible at exit.
+	if elemRes := d.Execute(&flow.AssertVisibleStep{
+		Selector: flow.Selector{Text: "DoIt"},
+	}); !elemRes.Success {
+		t.Errorf("button should be visible after scrollUntilVisible: %s", elemRes.Message)
+	}
+}

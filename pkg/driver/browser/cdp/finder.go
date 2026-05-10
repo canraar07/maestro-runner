@@ -747,8 +747,14 @@ func (d *Driver) elementInfo(elem *rod.Element) *core.ElementInfo {
 		}
 	}
 
-	if visible, err := elem.Visible(); err == nil {
-		info.Visible = visible
+	// Route visibility through __maestro._isElementVisible rather than Rod's
+	// own check. Rod's elem.Visible() does intrinsic-only checks (display,
+	// computed style, getBoundingClientRect) that report iframe-clipped
+	// elements as visible. The shared helper additionally intersects against
+	// each ancestor iframe's content viewport, which is what scrollUntilVisible
+	// and waitForVisible need to correctly identify scrolled-out targets.
+	if v, err := elem.Eval(`() => window.__maestro._isElementVisible(this)`); err == nil {
+		info.Visible = v.Value.Bool()
 	}
 
 	// Skip attribute lookups for text nodes
