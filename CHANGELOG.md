@@ -7,6 +7,130 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.14] - 2026-05-12
+
+This release closes out the Flutter Web testing story. v1.1.13 fixed the *finding* layer (selectors traverse same-origin iframes, `index` is a first-class web selector). v1.1.14 completes it: selectors also pierce open shadow roots, `tapOn` dispatches at correct top-frame viewport coordinates when the target lives inside an iframe (with hit-target verification), the same path extends to `doubleTapOn` / `longPressOn` / `scrollUntilVisible`, visibility checks intersect iframe content viewports, and `tapOn` handles Flutter Web's `<flutter-view>` pointer-router glass pane that consumes trusted events before any third-party listener can observe them. A real Flutter Web user — [@richjun](https://github.com/richjun) — drove most of this with two substantial PRs ([#73](https://github.com/devicelab-dev/maestro-runner/pull/73), [#74](https://github.com/devicelab-dev/maestro-runner/pull/74)) and two issue reports ([#71](https://github.com/devicelab-dev/maestro-runner/issues/71), [#72](https://github.com/devicelab-dev/maestro-runner/issues/72)).
+
+### Added
+- **Selectors pierce open shadow roots on web** — `text` / CSS / `id` / attribute /
+  role finders, plus the visibility and wait helpers, now recurse through
+  every same-origin `<iframe>` *and* every open `shadowRoot` reachable from
+  them. Flutter Web mounts its accessibility tree inside an open shadow root
+  attached to `<flt-glass-pane>`, so `tapOn: "Close"` against a Flutter Web
+  semantics node now resolves to the actual element. Closed shadow roots
+  remain unreachable (same constraint every WebDriver-class tool has — no
+  fix possible without privileged access). Reported by
+  [@richjun](https://github.com/richjun) ([#71](https://github.com/devicelab-dev/maestro-runner/issues/71)).
+- **`tapOn text + index` enumerates across iframes / shadow roots** —
+  completes the [#67](https://github.com/devicelab-dev/maestro-runner/issues/67) fix from 1.1.13.
+  Previously the resolver enumerated matches only within the top frame, so
+  asking for index 1 when matches 0..N-1 lived in the top frame and the
+  real target lived in an iframe silently re-tapped the in-range top-frame
+  match — green test, wrong button. Now walks every same-origin root via
+  `_collectRoots()`, sorts by document order, and indexes deterministically.
+  Out-of-range returns a precise error with the actual match count instead
+  of falling back. Reported by [@richjun](https://github.com/richjun)
+  ([#72](https://github.com/devicelab-dev/maestro-runner/issues/72)).
+- **`tapOn` dispatches at top-frame coordinates for iframe-nested targets** —
+  Rod's `Element.Click()` used iframe-LOCAL viewport coordinates from
+  `getBoundingClientRect()`; CDP `Input.dispatchMouseEvent` operates in
+  TOP-FRAME viewport coordinates. The click landed at the wrong place and
+  `tapOn` reported success silently. Now ports Playwright's
+  `_checkFrameIsHitTarget` walk: from the target outward, adds each
+  ancestor `<iframe>` element's box plus its content-area inset (border +
+  padding) to convert iframe-local → top-frame viewport coordinates.
+  Hit-target verification runs as both static pre-flight (rejects
+  occluded / wrong-element clicks before dispatch) and post-click trusted-
+  event capture (verifies the click landed on the target's frame tree).
+  Contributed by [@richjun](https://github.com/richjun) in
+  [#73](https://github.com/devicelab-dev/maestro-runner/pull/73).
+- **`doubleTapOn` / `longPressOn` / `scrollUntilVisible` inherit the
+  iframe-coord-translated path** — same root cause as `tapOn` had. Now
+  routed through a shared `dispatchCrossRoot` helper. `scrollUntilVisible`
+  for iframe-nested targets calls native `Element.scrollIntoView()` inside
+  the element's own document (the previous page-level `Mouse.Scroll` only
+  scrolled the outer document and never reached iframe content).
+- **Visibility check intersects iframe content viewport** —
+  `_isElementVisible` used to do intrinsic-only checks (computed style +
+  `getBoundingClientRect()` dimensions) and reported elements scrolled or
+  clipped outside their iframe's content viewport as "visible." This made
+  `assertVisible` / `waitForVisible` / `extendedWaitUntil` silently pass
+  on iframe-clipped elements, and made `scrollUntilVisible`'s loop exit
+  on iteration 0 (the new `scrollIntoView` branch was unreachable in
+  practice). Now walks the iframe ancestor chain at each level,
+  intersecting with the iframe's content viewport. Empty intersection
+  returns false; surviving rect is translated to parent coordinates and
+  rechecked. Top-frame "below the fold" elements stay visible — only
+  iframe clipping is added.
+- **`tapOn` into Flutter Web semantics** — three orthogonal fixes for
+  Flutter Web targets. `findBySearch` now rejects non-tappable text
+  containers (`<script>` / `<style>` / `<template>` / etc.) because CDP
+  `DOM.performSearch` matches against serialized HTML and Flutter Web
+  pages whose JS source contains the button label as a string literal
+  silently returned the `<script>` element. The hit-target pre-flight
+  and post-click verifier both accept the Flutter `<flutter-view>` glass-
+  pane occlusion case (target + topmost hit both inside `<flutter-view>`);
+  Flutter intercepts trusted pointer events at the document/glass-pane
+  capture layer and routes them through its own internal pointer router
+  for semantics dispatch, so the verifier's one-shot listener never fires
+  and a strict same-element walk-up always reports false occlusion. Non-
+  Flutter occlusion (overlay div, modal, genuine z-stack) continues to
+  fail-fast — the Occluded and Transformed regression tests still reject.
+  Contributed by [@richjun](https://github.com/richjun) in
+  [#74](https://github.com/devicelab-dev/maestro-runner/pull/74).
+
+### Fixed
+- **`runScript` per-call scope + persistent `output` mutations** — two
+  related bugs. (a) top-level `const` / `let` / `function` declarations
+  collided across `runScript` calls because the JS engine reused a single
+  Goja runtime's global scope, surfacing as
+  `SyntaxError: Identifier 'word' has already been declared` on the second
+  invocation. Each `runScript` now executes inside an IIFE so top-level
+  declarations are function-scoped to that invocation. (b) Mutations like
+  `output.list.push(x)` did not persist across `runScript` calls because
+  the `output` proxy returned a snapshot Go map per call — only whole-
+  value reassignment (`output.list = [...]`) survived. The `output` bag
+  is now a Goja-native `Object` shared across invocations so mutations
+  persist. Reported by [@Sina-KH](https://github.com/Sina-KH)
+  ([#70](https://github.com/devicelab-dev/maestro-runner/issues/70)).
+- **iOS `openLink` on simulator** — `POST /session/<sid>/url` on
+  WebDriverAgent v12+ returns `Unhandled endpoint: /url`. Users who ran
+  `maestro-runner wda update` and got the newer WDA hit a hard failure
+  on every `openLink` step, blocking Expo dev client flows where deep
+  linking loads the JS bundle from Metro. Bypassed entirely on
+  simulators by shelling out to `xcrun simctl openurl <udid> <url>` —
+  same primitive Maestro CLI uses, faster, no WDA version coupling.
+  Real iOS devices keep the existing WDA `/url` path (`simctl` can't
+  reach them). Reported by [@jongbelegen](https://github.com/jongbelegen)
+  ([#68](https://github.com/devicelab-dev/maestro-runner/issues/68)).
+- **iOS `clearState` on simulator no longer requires `--app-file`** —
+  the runner needs to uninstall + reinstall the app to wipe its data
+  container (Apple doesn't expose a "clear data only" API). Previously
+  failed with either `clearState on iOS requires --app-file` (no
+  `--app-file`) or `lstat ... No such file or directory` (if
+  `--app-file` pointed inside the live sim container, which the
+  uninstall deleted before install could read it). Now auto-discovers
+  the installed `.app` via `xcrun simctl get_app_container` and copies
+  it to a temp directory before the uninstall — same approach Maestro
+  CLI uses (`LocalSimulatorUtils.kt#reinstallApp`). Reported by
+  [@jongbelegen](https://github.com/jongbelegen)
+  ([#69](https://github.com/devicelab-dev/maestro-runner/issues/69)).
+
+### Contributors
+
+[@richjun](https://github.com/richjun)
+1. Reported selectors not piercing shadow DOM ([#71](https://github.com/devicelab-dev/maestro-runner/issues/71))
+2. Reported `tapOn text+index` not spanning iframes ([#72](https://github.com/devicelab-dev/maestro-runner/issues/72))
+3. Contributed iframe + shadow-root coord-translated `tapOn` with hit-target verification ([#73](https://github.com/devicelab-dev/maestro-runner/pull/73))
+4. Contributed Flutter Web semantics support — finder rejection, pre-flight and post-click glass-pane concession ([#74](https://github.com/devicelab-dev/maestro-runner/pull/74))
+
+[@Sina-KH](https://github.com/Sina-KH)
+1. Reported `runScript` top-level declaration collisions and non-persistent `output` mutations ([#70](https://github.com/devicelab-dev/maestro-runner/issues/70))
+
+[@jongbelegen](https://github.com/jongbelegen)
+1. Reported iOS `openLink` failing on simulator after WDA upgrade ([#68](https://github.com/devicelab-dev/maestro-runner/issues/68))
+2. Reported iOS `clearState` on simulator failing without / with `--app-file` ([#69](https://github.com/devicelab-dev/maestro-runner/issues/69))
+
 ## [1.1.13] - 2026-05-05
 
 ### Added
