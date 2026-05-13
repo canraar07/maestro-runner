@@ -324,55 +324,113 @@ func TestBuildSelectorsRegexPattern(t *testing.T) {
 }
 
 func TestBuildSelectorsID(t *testing.T) {
+	// buildSelectors (non-tap path, preferClickable=false) for an id-only
+	// selector now emits two strategies: exact resourceId first, then
+	// substring resourceIdMatches as fallback.
 	sel := flow.Selector{ID: "login_btn"}
 	strategies, err := buildSelectors(sel, 17000)
 	if err != nil {
 		t.Fatalf("buildSelectors failed: %v", err)
 	}
 
-	if len(strategies) != 1 {
-		t.Errorf("expected 1 strategy, got %d", len(strategies))
+	if len(strategies) != 2 {
+		t.Fatalf("expected 2 strategies (exact + substring), got %d", len(strategies))
 	}
 
-	s := strategies[0]
-	if !strings.Contains(s.Value, "resourceIdMatches") {
-		t.Error("expected resourceIdMatches in selector")
+	// First strategy must be EXACT match — preventing the silent-wrong-element
+	// bug where lazy-rendered ListView contents tripped the substring scan.
+	if !strings.Contains(strategies[0].Value, `resourceId("login_btn")`) {
+		t.Errorf("expected exact resourceId first, got: %s", strategies[0].Value)
+	}
+	if strings.Contains(strategies[0].Value, "resourceIdMatches") {
+		t.Errorf("first strategy must not be a substring match, got: %s", strategies[0].Value)
+	}
+
+	// Second strategy is the substring fallback.
+	if !strings.Contains(strategies[1].Value, `resourceIdMatches(".*login_btn.*")`) {
+		t.Errorf("expected substring fallback second, got: %s", strategies[1].Value)
+	}
+}
+
+func TestBuildSelectorsForTapID(t *testing.T) {
+	// Tap path (preferClickable=true) for an id-only selector emits four
+	// strategies: exact+clickable, exact, substring+clickable, substring.
+	// Order matters — clickable variants of each match level go first so a
+	// tap on a labeled wrapper still prefers the actual button when present.
+	sel := flow.Selector{ID: "login_btn"}
+	strategies, err := buildSelectorsForTap(sel, 17000)
+	if err != nil {
+		t.Fatalf("buildSelectorsForTap failed: %v", err)
+	}
+
+	if len(strategies) != 4 {
+		t.Fatalf("expected 4 strategies (exact+click, exact, substr+click, substr), got %d", len(strategies))
+	}
+
+	cases := []struct {
+		idx    int
+		want   string
+		notWant string
+	}{
+		{0, `resourceId("login_btn").clickable(true)`, "resourceIdMatches"},
+		{1, `resourceId("login_btn")`, "resourceIdMatches"},
+		{2, `resourceIdMatches(".*login_btn.*").clickable(true)`, ""},
+		{3, `resourceIdMatches(".*login_btn.*")`, ""},
+	}
+	for _, c := range cases {
+		if !strings.Contains(strategies[c.idx].Value, c.want) {
+			t.Errorf("strategy[%d] missing %q: %s", c.idx, c.want, strategies[c.idx].Value)
+		}
+		if c.notWant != "" && strings.Contains(strategies[c.idx].Value, c.notWant) {
+			t.Errorf("strategy[%d] unexpectedly contains %q: %s", c.idx, c.notWant, strategies[c.idx].Value)
+		}
+	}
+
+	// Also verify the exact pair comes before the substring pair — the
+	// load-bearing ordering for the bug fix.
+	exactIdx := strings.Index(strategies[1].Value, `resourceId("login_btn")`)
+	substringIdx := strings.Index(strategies[2].Value, `resourceIdMatches`)
+	if exactIdx < 0 || substringIdx < 0 {
+		t.Fatal("expected pair[1]=exact and pair[2]=substring")
 	}
 }
 
 func TestBuildSelectorsIDRegex(t *testing.T) {
-	// Regex ID pattern — wrapped with .* and quotes-only escaping (regex chars preserved)
+	// Regex ID pattern — non-regex chars are escaped only for quotes; regex
+	// chars are preserved. Both exact and substring strategies now emit,
+	// but the substring variant (which respects user-supplied regex chars
+	// via resourceIdMatches) is the relevant one for regex IDs.
 	sel := flow.Selector{ID: `item_\d+`}
 	strategies, err := buildSelectors(sel, 5000)
 	if err != nil {
 		t.Fatalf("buildSelectors failed: %v", err)
 	}
 
-	if len(strategies) != 1 {
-		t.Errorf("expected 1 strategy, got %d", len(strategies))
+	if len(strategies) != 2 {
+		t.Fatalf("expected 2 strategies, got %d", len(strategies))
 	}
 
-	s := strategies[0]
-	if !strings.Contains(s.Value, "resourceIdMatches") {
-		t.Error("expected resourceIdMatches in selector")
+	// The substring strategy preserves regex metacharacters.
+	if !strings.Contains(strategies[1].Value, "resourceIdMatches") {
+		t.Error("expected resourceIdMatches in substring strategy")
 	}
-	// Regex chars should NOT be escaped
-	if !strings.Contains(s.Value, `\d+`) {
-		t.Errorf("expected regex pattern preserved in selector, got: %s", s.Value)
+	if !strings.Contains(strategies[1].Value, `\d+`) {
+		t.Errorf("expected regex pattern preserved, got: %s", strategies[1].Value)
 	}
 }
 
 func TestBuildSelectorsIDLiteral(t *testing.T) {
-	// Literal ID should be wrapped with .* for partial matching
+	// Literal ID — substring strategy still wraps with .* for users who
+	// rely on the legacy substring behaviour, but exact is now tried first.
 	sel := flow.Selector{ID: "login_btn"}
 	strategies, err := buildSelectors(sel, 5000)
 	if err != nil {
 		t.Fatalf("buildSelectors failed: %v", err)
 	}
 
-	s := strategies[0]
-	if !strings.Contains(s.Value, `".*login_btn.*"`) {
-		t.Errorf("literal ID should be wrapped with .*, got: %s", s.Value)
+	// Substring fallback (index 1) — preserve the .* wrap.
+	if !strings.Contains(strategies[1].Value, `".*login_btn.*"`) {
+		t.Errorf("literal ID substring fallback should be wrapped with .*, got: %s", strategies[1].Value)
 	}
 }
 
