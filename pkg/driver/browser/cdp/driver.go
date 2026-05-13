@@ -14,6 +14,7 @@ import (
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
+	"github.com/devicelab-dev/maestro-runner/pkg/report"
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
@@ -702,6 +703,25 @@ func (d *Driver) ConsoleLogs() []ConsoleEntry {
 	defer d.consoleMu.Unlock()
 	out := make([]ConsoleEntry, len(d.consoleLogs))
 	copy(out, d.consoleLogs)
+	return out
+}
+
+// ConsoleLogReport returns the captured console entries shaped for the
+// per-flow report. Implements the executor's consoleLogReporter interface so
+// the flow runner can auto-surface JS errors without requiring users to
+// invoke `getConsoleLogs` explicitly. Web flows only — other drivers don't
+// implement this method, and the executor's type assertion returns nil for
+// them.
+func (d *Driver) ConsoleLogReport() []report.ConsoleLog {
+	d.consoleMu.Lock()
+	defer d.consoleMu.Unlock()
+	if len(d.consoleLogs) == 0 {
+		return nil
+	}
+	out := make([]report.ConsoleLog, len(d.consoleLogs))
+	for i, e := range d.consoleLogs {
+		out[i] = report.ConsoleLog{Level: e.Level, Message: e.Message}
+	}
 	return out
 }
 

@@ -237,6 +237,15 @@ func (fr *FlowRunner) Run() FlowResult {
 		}
 	}
 
+	// Pull console / page error entries from the driver (web only).
+	// Any driver that exposes ConsoleLogReport() — the CDP browser driver
+	// does today, others return nothing — surfaces its captured entries
+	// into the flow report so users see JS errors without writing an
+	// explicit `assertNoJSErrors` / `getConsoleLogs` step.
+	if logs := collectConsoleLogs(fr.driver); len(logs) > 0 {
+		fr.flowWriter.SetConsoleLogs(logs)
+	}
+
 	// Mark flow as complete
 	fr.flowWriter.End(flowStatus)
 
@@ -1110,4 +1119,23 @@ func (fr *FlowRunner) captureArtifacts(cmdIdx int, timing string) report.Command
 	}
 
 	return artifacts
+}
+
+// consoleLogReporter is a duck-typed interface drivers can optionally
+// implement to surface browser console / page error entries into the flow
+// report. The CDP browser driver implements it (see
+// pkg/driver/browser/cdp). Mobile / native drivers don't, and that's fine
+// — the type assertion fails and we leave ConsoleLogs nil.
+type consoleLogReporter interface {
+	ConsoleLogReport() []report.ConsoleLog
+}
+
+// collectConsoleLogs extracts console entries from a driver if it
+// implements consoleLogReporter, returning nil otherwise.
+func collectConsoleLogs(d core.Driver) []report.ConsoleLog {
+	provider, ok := core.Unwrap(d).(consoleLogReporter)
+	if !ok {
+		return nil
+	}
+	return provider.ConsoleLogReport()
 }

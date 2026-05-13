@@ -158,6 +158,96 @@ func TestGenerateHTML(t *testing.T) {
 	}
 }
 
+// TestGenerateHTML_RendersConsoleLogs verifies that when a flow detail has
+// captured browser console entries, the HTML report includes the
+// console-logs section, the renderConsoleLogs JS, and the entries
+// themselves in the embedded report data. This is the regression test for
+// the auto-surface console-error feature.
+func TestGenerateHTML_RendersConsoleLogs(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	now := time.Now()
+	duration := int64(500)
+	index := &Index{
+		Version:     "1.0.0",
+		Status:      StatusPassed,
+		StartTime:   now,
+		LastUpdated: now,
+		Device:      Device{ID: "browser", Name: "Chrome", Platform: "web"},
+		App:         App{ID: "test"},
+		MaestroRunner: RunnerInfo{
+			Version: "0.1.0",
+			Driver:  "cdp",
+		},
+		Summary: Summary{Total: 1, Passed: 1},
+		Flows: []FlowEntry{
+			{
+				Index: 0, ID: "flow-000", Name: "Console Test",
+				SourceFile: "flows/console.yaml", DataFile: "flows/flow-000.json",
+				AssetsDir: "assets/flow-000", Status: StatusPassed,
+				Duration: &duration,
+				Commands: CommandSummary{Total: 1, Passed: 1},
+			},
+		},
+	}
+
+	cmdDuration := int64(200)
+	flowDetail := FlowDetail{
+		ID: "flow-000", Name: "Console Test", SourceFile: "flows/console.yaml",
+		StartTime: now, Duration: &duration,
+		Commands: []Command{
+			{ID: "cmd-000", Index: 0, Type: "launchApp", Status: StatusPassed, Duration: &cmdDuration},
+		},
+		ConsoleLogs: []ConsoleLog{
+			{Level: "error", Message: "uncaught TypeError: x is undefined"},
+			{Level: "warning", Message: "deprecated API call"},
+			{Level: "exception", Message: "Error: kaboom\n    at app.js:42"},
+		},
+	}
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, "flows"), 0o755); err != nil {
+		t.Fatalf("create flows dir: %v", err)
+	}
+	if err := atomicWriteJSON(filepath.Join(tmpDir, "report.json"), index); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+	if err := atomicWriteJSON(filepath.Join(tmpDir, "flows", "flow-000.json"), flowDetail); err != nil {
+		t.Fatalf("write flow: %v", err)
+	}
+
+	outputPath := filepath.Join(tmpDir, "report.html")
+	if err := GenerateHTML(tmpDir, HTMLConfig{OutputPath: outputPath, Title: "Console Test"}); err != nil {
+		t.Fatalf("GenerateHTML: %v", err)
+	}
+
+	content, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read html: %v", err)
+	}
+	html := string(content)
+
+	// Each of these must be present for the feature to be visible to the user:
+	checks := []struct {
+		name, want string
+	}{
+		// Static template surface.
+		{"console-logs container div", `id="console-logs"`},
+		{"renderConsoleLogs JS function", `function renderConsoleLogs(`},
+		{"CSS for the console section", `.console-header`},
+		{"CSS for error-level entries", `.console-error`},
+		// Per-flow data embedded into the page (consoleLogs JSON-marshalled).
+		{"consoleLogs field in embedded JSON", `"consoleLogs"`},
+		{"error message round-tripped", "uncaught TypeError"},
+		{"warning message round-tripped", "deprecated API call"},
+		{"exception message round-tripped", "kaboom"},
+	}
+	for _, c := range checks {
+		if !strings.Contains(html, c.want) {
+			t.Errorf("%s: HTML missing %q", c.name, c.want)
+		}
+	}
+}
+
 func TestGenerateHTMLWithError(t *testing.T) {
 	tmpDir := t.TempDir()
 

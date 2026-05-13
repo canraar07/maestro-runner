@@ -1027,6 +1027,57 @@ const htmlTemplate = `<!DOCTYPE html>
             border-radius: 8px;
         }
 
+        .console-logs { margin-top: 16px; }
+        .console-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: #fff8e1;
+            border: 1px solid #ffe082;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9em;
+            user-select: none;
+        }
+        .console-header:hover { background: #fff3c4; }
+        .console-expand { color: #888; }
+        .console-title { font-weight: 600; color: #f57c00; }
+        .console-count { color: #555; }
+        .console-errors { color: #c62828; font-weight: 600; }
+        .console-warns { color: #ef6c00; font-weight: 600; }
+        .console-body {
+            margin-top: 8px;
+            border: 1px solid #eee;
+            border-radius: 4px;
+            background: #fafafa;
+            max-height: 320px;
+            overflow-y: auto;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.85em;
+        }
+        .console-entry {
+            display: flex;
+            gap: 8px;
+            padding: 6px 10px;
+            border-bottom: 1px solid #eee;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .console-entry:last-child { border-bottom: none; }
+        .console-level {
+            flex-shrink: 0;
+            text-transform: uppercase;
+            font-weight: 600;
+            min-width: 70px;
+        }
+        .console-error .console-level,
+        .console-exception .console-level { color: #c62828; }
+        .console-warn .console-level,
+        .console-warning .console-level { color: #ef6c00; }
+        .console-info .console-level { color: #1565c0; }
+        .console-log .console-level,
+        .console-debug .console-level { color: #666; }
     </style>
 </head>
 <body>
@@ -1187,6 +1238,7 @@ const htmlTemplate = `<!DOCTYPE html>
                 </div>
                 <div class="detail-info" id="detail-info"></div>
                 <div class="command-list" id="command-list"></div>
+                <div class="console-logs" id="console-logs"></div>
             </div>
         </div>
     </div>
@@ -1634,6 +1686,40 @@ const htmlTemplate = `<!DOCTYPE html>
 
             // Commands - compact format with sub-commands support
             document.getElementById('command-list').innerHTML = renderCommands(flow.commands, flowIndex, 0);
+
+            // Browser console / page errors (web flows only — empty for mobile)
+            document.getElementById('console-logs').innerHTML = renderConsoleLogs(flow.consoleLogs);
+        }
+
+        function renderConsoleLogs(logs) {
+            if (!logs || logs.length === 0) return '';
+            const errorCount = logs.filter(l => l.level === 'error' || l.level === 'exception').length;
+            const warnCount = logs.filter(l => l.level === 'warning' || l.level === 'warn').length;
+            let header = '<div class="console-header" onclick="toggleConsoleLogs(this)">' +
+                '<span class="console-expand">▶</span>' +
+                '<span class="console-title">Browser console</span>' +
+                '<span class="console-count">' + logs.length + ' entr' + (logs.length === 1 ? 'y' : 'ies');
+            if (errorCount > 0) header += ' · <span class="console-errors">' + errorCount + ' error' + (errorCount === 1 ? '' : 's') + '</span>';
+            if (warnCount > 0) header += ' · <span class="console-warns">' + warnCount + ' warning' + (warnCount === 1 ? '' : 's') + '</span>';
+            header += '</span></div>';
+            let body = '<div class="console-body" style="display:none">';
+            logs.forEach(l => {
+                const lvl = (l.level || 'log').toLowerCase();
+                body += '<div class="console-entry console-' + escapeHtml(lvl) + '">' +
+                    '<span class="console-level">' + escapeHtml(lvl) + '</span>' +
+                    '<span class="console-message">' + escapeHtml(l.message || '') + '</span>' +
+                    '</div>';
+            });
+            body += '</div>';
+            return header + body;
+        }
+
+        function toggleConsoleLogs(el) {
+            const body = el.nextElementSibling;
+            const arrow = el.querySelector('.console-expand');
+            const open = body.style.display === 'none';
+            body.style.display = open ? '' : 'none';
+            if (arrow) arrow.textContent = open ? '▼' : '▶';
         }
 
         function renderCommands(commands, flowIndex, depth) {

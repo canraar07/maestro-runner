@@ -133,6 +133,13 @@ func (w *FlowWriter) SetFlowArtifacts(artifacts FlowArtifacts) {
 	w.flush()
 }
 
+// SetConsoleLogs records browser console / page error entries captured during
+// the flow. Web flows only — mobile / native drivers leave this nil.
+func (w *FlowWriter) SetConsoleLogs(logs []ConsoleLog) {
+	w.flow.ConsoleLogs = logs
+	w.flush()
+}
+
 // AddVideoTimestamp adds a video timestamp mapping.
 func (w *FlowWriter) AddVideoTimestamp(cmdIndex int, videoTimeMs int64) {
 	w.flow.Artifacts.VideoTimestamps = append(w.flow.Artifacts.VideoTimestamps, VideoTimestamp{

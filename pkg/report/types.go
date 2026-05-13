@@ -144,16 +144,25 @@ type AttemptEntry struct {
 
 // FlowDetail contains full flow execution details.
 type FlowDetail struct {
-	ID         string        `json:"id"`
-	Name       string        `json:"name"`
-	SourceFile string        `json:"sourceFile"`
-	Tags       []string      `json:"tags,omitempty"`
-	Device     *Device       `json:"device,omitempty"` // Device that ran this flow (for multi-device runs)
-	StartTime  time.Time     `json:"startTime"`
-	EndTime    *time.Time    `json:"endTime,omitempty"`
-	Duration   *int64        `json:"duration,omitempty"` // milliseconds
-	Commands   []Command     `json:"commands"`
-	Artifacts  FlowArtifacts `json:"artifacts"`
+	ID          string        `json:"id"`
+	Name        string        `json:"name"`
+	SourceFile  string        `json:"sourceFile"`
+	Tags        []string      `json:"tags,omitempty"`
+	Device      *Device       `json:"device,omitempty"` // Device that ran this flow (for multi-device runs)
+	StartTime   time.Time     `json:"startTime"`
+	EndTime     *time.Time    `json:"endTime,omitempty"`
+	Duration    *int64        `json:"duration,omitempty"` // milliseconds
+	Commands    []Command     `json:"commands"`
+	Artifacts   FlowArtifacts `json:"artifacts"`
+	ConsoleLogs []ConsoleLog  `json:"consoleLogs,omitempty"` // Browser console / page errors captured during the flow (web only)
+}
+
+// ConsoleLog represents a single browser console message or uncaught JS
+// exception captured during a web flow. Levels: "log", "warn", "error",
+// "info", "debug", "exception".
+type ConsoleLog struct {
+	Level   string `json:"level"`
+	Message string `json:"message"`
 }
 
 // Command represents a single command execution.
