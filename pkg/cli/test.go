@@ -468,6 +468,9 @@ type RunConfig struct {
 	ShutdownAfter     bool   // Shutdown emulators/simulators started by maestro-runner after tests
 	BootTimeout       int    // Device boot timeout in seconds
 
+	// Driver start
+	DriverStartTimeout int // Override driver start timeout in seconds (0 = use driver default — 30s Android, 90s iOS WDA)
+
 	// Install control
 	NoAppInstall    bool // Skip app installation
 	NoDriverInstall bool // Skip driver installation
@@ -634,6 +637,7 @@ func runTest(c *cli.Context) error {
 		AutoStartEmulator:  getBool("auto-start-emulator"),
 		ShutdownAfter:      getBool("shutdown-after"),
 		BootTimeout:        getInt("boot-timeout"),
+		DriverStartTimeout: getInt("driver-start-timeout"),
 		NoAppInstall:       getBool("no-app-install"),
 		NoDriverInstall:    getBool("no-driver-install"),
 		NoFlutterFallback:  getBool("no-flutter-fallback"),

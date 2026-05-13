@@ -146,6 +146,10 @@ func createUIAutomator2Driver(cfg *RunConfig, dev *device.AndroidDevice, info de
 	printSetupStep("Starting UIAutomator2 server...")
 	logger.Info("Starting UIAutomator2 server on device %s", dev.Serial())
 	uia2Cfg := device.DefaultUIAutomator2Config()
+	if cfg.DriverStartTimeout > 0 {
+		uia2Cfg.Timeout = time.Duration(cfg.DriverStartTimeout) * time.Second
+		logger.Info("Overriding UIAutomator2 start timeout to %v (--driver-start-timeout)", uia2Cfg.Timeout)
+	}
 	if err := dev.StartUIAutomator2(uia2Cfg); err != nil {
 		logger.Error("Failed to start UIAutomator2: %v", err)
 		return nil, nil, fmt.Errorf("start UIAutomator2: %w", err)
@@ -331,6 +335,10 @@ func createDeviceLabDriver(cfg *RunConfig, dev *device.AndroidDevice, info devic
 	printSetupStep("Starting DeviceLab driver...")
 	logger.Info("Starting DeviceLab driver on device %s", dev.Serial())
 	driverCfg := device.DefaultDeviceLabDriverConfig()
+	if cfg.DriverStartTimeout > 0 {
+		driverCfg.Timeout = time.Duration(cfg.DriverStartTimeout) * time.Second
+		logger.Info("Overriding DeviceLab driver start timeout to %v (--driver-start-timeout)", driverCfg.Timeout)
+	}
 	if err := dev.StartDeviceLabDriver(driverCfg); err != nil {
 		logger.Error("Failed to start DeviceLab driver: %v", err)
 		return nil, nil, fmt.Errorf("start DeviceLab driver: %w", err)

@@ -108,6 +108,12 @@ var GlobalFlags = []cli.Flag{
 		Value: 180,
 		Usage: "Device boot timeout in seconds",
 	},
+	&cli.IntFlag{
+		Name:    "driver-start-timeout",
+		Value:   0,
+		Usage:   "Override driver start timeout in seconds (0 = use driver default — 30s for UIAutomator2 / DeviceLab Android, 90s for WDA iOS). Bump to 120+ for slow cloud farms (AWS Device Farm, low-end shared devices) where APK install + dex2oat takes >30s.",
+		EnvVars: []string{"MAESTRO_DRIVER_START_TIMEOUT"},
+	},
 }
 
 // Execute runs the CLI.

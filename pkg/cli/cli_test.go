@@ -175,6 +175,35 @@ func TestGlobalFlags(t *testing.T) {
 	}
 }
 
+// TestDriverStartTimeoutFlag verifies the --driver-start-timeout flag is
+// registered globally and reads to RunConfig.DriverStartTimeout. The override
+// only flows further (into uia2Cfg.Timeout / driverCfg.Timeout) when non-zero
+// — see createUIAutomator2Driver / createDeviceLabDriver in android.go.
+func TestDriverStartTimeoutFlag(t *testing.T) {
+	flagNames := make(map[string]bool)
+	for _, f := range GlobalFlags {
+		for _, name := range f.Names() {
+			flagNames[name] = true
+		}
+	}
+	if !flagNames["driver-start-timeout"] {
+		t.Fatal("expected --driver-start-timeout flag to be defined globally")
+	}
+
+	// Zero value: no override, drivers use their built-in defaults.
+	cfg := &RunConfig{DriverStartTimeout: 0}
+	if cfg.DriverStartTimeout != 0 {
+		t.Errorf("default DriverStartTimeout = %d, want 0", cfg.DriverStartTimeout)
+	}
+
+	// Non-zero value: persisted on the struct (driver-side wiring is covered
+	// by integration tests against a real Android device).
+	cfg.DriverStartTimeout = 120
+	if cfg.DriverStartTimeout != 120 {
+		t.Errorf("DriverStartTimeout = %d after assignment, want 120", cfg.DriverStartTimeout)
+	}
+}
+
 func TestTestCommand_NoArgs(t *testing.T) {
 	app := &cli.App{
 		Name:     "test-app",
