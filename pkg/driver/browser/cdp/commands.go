@@ -26,6 +26,15 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		return errorResult(err, fmt.Sprintf("Failed to find element %s", step.Selector.DescribeQuoted()))
 	}
 
+	// Actionability gate: brief poll until visible + enabled + pointer-events.
+	// findElement already required Visible per the iframe-clipping-aware
+	// check; this catches the additional "disabled / aria-disabled /
+	// pointer-events:none" cases that visibility doesn't cover, and gives a
+	// short window for state to settle if the page just enabled the control.
+	if err := d.waitForActionable(elem, defaultActionableTimeoutMs); err != nil {
+		return errorResult(err, fmt.Sprintf("Element not actionable: %s", step.Selector.DescribeQuoted()))
+	}
+
 	// Handle <option> elements: select the option via its parent <select> instead of clicking
 	tag, _ := elem.Eval(`() => this.tagName.toLowerCase()`)
 	if tag != nil && tag.Value.Str() == "option" {
@@ -1942,4 +1951,36 @@ var lastNames = []string{"Smith", "Johnson", "Brown", "Taylor", "Wilson", "Davis
 
 func randomPersonName() string {
 	return firstNames[cryptoRandIntn(len(firstNames))] + " " + lastNames[cryptoRandIntn(len(lastNames))]
+}
+
+// waitForActionable polls __maestro._isActionable until it returns true or
+// the timeout elapses. Used as a pre-dispatch gate by action commands
+// (tapOn at present; doubleTapOn / longPressOn / inputText to follow).
+//
+// findElement already required visibility per the iframe-clipping-aware
+// _isElementVisible check, so the common case here is "already actionable
+// on first probe." The poll catches the post-find state changes our find
+// path doesn't: disabled / aria-disabled / pointer-events transitioning
+// off, or a freshly-enabled control inside a modal that hasn't quite
+// committed its state yet.
+//
+// Polling cadence: 50ms. With a 2s default budget this gives ~40 probes,
+// which is plenty for any realistic enable-transition timing without
+// burning meaningful test runtime when the element is already actionable.
+func (d *Driver) waitForActionable(elem *rod.Element, timeoutMs int) error {
+	if timeoutMs <= 0 {
+		timeoutMs = defaultActionableTimeoutMs
+	}
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	for {
+		res, err := elem.Eval(`() => window.__maestro._isActionable(this)`)
+		if err == nil && res != nil && res.Value.Bool() {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("element not actionable within %dms (visible + enabled + pointer-events check)", timeoutMs)
 }

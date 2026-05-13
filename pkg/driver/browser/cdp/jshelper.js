@@ -209,6 +209,46 @@ window.__maestro = {
     return true;
   },
 
+  // _isActionable: Playwright-style actionability gate. Returns true when an
+  // element is in a state where a tap / type / etc. is likely to land
+  // correctly. Synchronous; the Go-side `waitForActionable` polls this until
+  // it returns true (or times out).
+  //
+  // Four checks:
+  //  1. Attached to a connected DOM tree.
+  //  2. Visible per `_isElementVisible` — includes iframe-clipping (B6 in the
+  //     visibility-check work) so elements scrolled outside their iframe's
+  //     content viewport are correctly reported as not visible.
+  //  3. Enabled — covers three orthogonal sources of "can't interact":
+  //       a. Form-control `disabled` property (button / input / select / ...)
+  //       b. ARIA `aria-disabled="true"` attribute
+  //       c. CSS `pointer-events: none` on the element itself or any
+  //          ancestor (computed style already reflects inheritance).
+  //  4. Not currently animating off-frame — deferred to a Go-side stable-
+  //     bounds poll once the synchronous checks pass. (Not yet implemented;
+  //     listed here so the design intent is clear when that lands.)
+  //
+  // What this DOESN'T check yet (Playwright does, we don't):
+  //  - Stable bounding-box across N RAF frames (waiting for animations).
+  //  - Receives-events-at-hit-point. We already have that for the iframe
+  //    coord-translated path via `expectHitTarget`; wiring it into the
+  //    actionability gate for top-frame targets is a follow-up.
+  _isActionable: function(el) {
+    if (!el || !el.isConnected) return false;
+    if (!this._isElementVisible(el)) return false;
+    // Enabled-property check (HTMLButtonElement / HTMLInputElement / etc.)
+    if (el.disabled === true) return false;
+    // ARIA disabled
+    if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return false;
+    // CSS pointer-events: 'none' (inherited)
+    var ownerWin = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+    if (ownerWin.getComputedStyle) {
+      var cs = ownerWin.getComputedStyle(el);
+      if (cs && cs.pointerEvents === 'none') return false;
+    }
+    return true;
+  },
+
   // _intersectsIframeChain: walk the iframe ancestor chain and verify the
   // element's rect intersects each iframe's content viewport (innerWidth ×
   // innerHeight of the iframe's contentWindow). Returns false on the first

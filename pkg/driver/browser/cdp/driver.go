@@ -21,7 +21,8 @@ import (
 )
 
 const (
-	defaultFindTimeoutMs  = 17000
+	defaultFindTimeoutMs        = 17000
+	defaultActionableTimeoutMs  = 2000 // brief window to wait for the actionable gate to pass post-find
 	optionalFindTimeoutMs = 7000
 	defaultViewportW      = 1280
 	defaultViewportH      = 800
