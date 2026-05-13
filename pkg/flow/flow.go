@@ -73,6 +73,7 @@ type Config struct {
 	CommandTimeout     int               `yaml:"commandTimeout"`     // Default timeout for all commands in ms (overrides driver default)
 	WaitForIdleTimeout *int              `yaml:"waitForIdleTimeout"` // Wait for device idle in ms (nil = use global, 0 = disabled)
 	TypingFrequency    *int              `yaml:"typingFrequency"`    // WDA typing speed in keys/sec (nil = use global, 0 = disabled)
+	FailOnConsoleError bool              `yaml:"failOnConsoleError"` // Web only: auto-fail the flow if any console.error / uncaught JS exception is captured
 	OnFlowStart        []Step            `yaml:"-"`                  // Lifecycle hook: runs before commands
 	OnFlowComplete     []Step            `yaml:"-"`                  // Lifecycle hook: runs after commands
 }

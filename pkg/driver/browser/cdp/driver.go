@@ -725,6 +725,20 @@ func (d *Driver) ConsoleLogReport() []report.ConsoleLog {
 	return out
 }
 
+// ClearConsoleLogReport resets the captured-console buffer. Called by the
+// flow runner at the start of each top-level flow so pre-flow noise (events
+// captured during driver construction's initial navigation, before the
+// user's first step ran) doesn't pollute the per-flow report — and so
+// per-flow auto-surface counts match what the user's flow actually
+// triggered. Same buffer the existing `clearConsoleLogs` flow step writes
+// to; this method exists separately so the executor can call it via the
+// consoleLogReporter interface without needing to dispatch a flow command.
+func (d *Driver) ClearConsoleLogReport() {
+	d.consoleMu.Lock()
+	defer d.consoleMu.Unlock()
+	d.consoleLogs = nil
+}
+
 // startConsoleHandler starts a background goroutine to capture console.log/error/warn
 // and uncaught JS exceptions via the CDP Runtime domain.
 func (d *Driver) startConsoleHandler() {

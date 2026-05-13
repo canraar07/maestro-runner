@@ -139,6 +139,14 @@ func (fr *FlowRunner) Run() FlowResult {
 	// Mark flow as started
 	fr.flowWriter.Start()
 
+	// Reset any console / page-error noise captured before the first step
+	// ran. The CDP browser driver subscribes to Runtime events during
+	// construction and the initial navigation to cfg.URL fires events
+	// before the user's flow begins — we don't want those polluting the
+	// flow's report or double-counting alongside the launchApp navigation.
+	// No-op for drivers that don't implement consoleLogReporter.
+	resetConsoleLogs(fr.driver)
+
 	// Execute all steps
 	flowStatus := report.StatusPassed
 	var flowError string
@@ -158,8 +166,8 @@ func (fr *FlowRunner) Run() FlowResult {
 			result := fr.executeNestedStep(step)
 			if !result.Success && !step.IsOptional() {
 				// onFlowStart failed - fail the flow
-				fr.flowWriter.End(report.StatusFailed)
 				errMsg := fmt.Sprintf("onFlowStart failed: %v", result.Error)
+				fr.flowWriter.End(report.StatusFailed, errMsg)
 				if fr.config.OnFlowEnd != nil {
 					fr.config.OnFlowEnd(flowName, false, time.Since(flowStart).Milliseconds(), errMsg)
 				}
@@ -242,12 +250,29 @@ func (fr *FlowRunner) Run() FlowResult {
 	// does today, others return nothing — surfaces its captured entries
 	// into the flow report so users see JS errors without writing an
 	// explicit `assertNoJSErrors` / `getConsoleLogs` step.
-	if logs := collectConsoleLogs(fr.driver); len(logs) > 0 {
-		fr.flowWriter.SetConsoleLogs(logs)
+	consoleLogs := collectConsoleLogs(fr.driver)
+	if len(consoleLogs) > 0 {
+		fr.flowWriter.SetConsoleLogs(consoleLogs)
 	}
 
-	// Mark flow as complete
-	fr.flowWriter.End(flowStatus)
+	// Opt-in stricter mode: fail the flow if the captured console contains
+	// any error / exception entries. Equivalent to running `assertNoJSErrors`
+	// at flow end, without requiring the user to add the step explicitly.
+	// Only takes effect when the flow's `failOnConsoleError: true` config is
+	// set AND the flow didn't already fail for another reason (we don't want
+	// to flip status from failed back to a different failure shape).
+	if fr.flow.Config.FailOnConsoleError && flowStatus != report.StatusFailed {
+		if msg := jsErrorSummary(consoleLogs); msg != "" {
+			flowStatus = report.StatusFailed
+			flowError = msg
+		}
+	}
+
+	// Mark flow as complete. Pass the flow-level error so the report picks
+	// up failures that didn't originate from a command (e.g.
+	// failOnConsoleError or runFlow timeout) — End() falls back to this
+	// when no command-level error is present.
+	fr.flowWriter.End(flowStatus, flowError)
 
 	// Calculate duration
 	flowDuration := time.Since(flowStart).Milliseconds()
@@ -1126,8 +1151,13 @@ func (fr *FlowRunner) captureArtifacts(cmdIdx int, timing string) report.Command
 // report. The CDP browser driver implements it (see
 // pkg/driver/browser/cdp). Mobile / native drivers don't, and that's fine
 // — the type assertion fails and we leave ConsoleLogs nil.
+//
+// ClearConsoleLogReport is called at the start of each top-level flow so
+// noise captured during driver construction (initial navigation before any
+// user step ran) doesn't pollute the flow's report.
 type consoleLogReporter interface {
 	ConsoleLogReport() []report.ConsoleLog
+	ClearConsoleLogReport()
 }
 
 // collectConsoleLogs extracts console entries from a driver if it
@@ -1138,4 +1168,35 @@ func collectConsoleLogs(d core.Driver) []report.ConsoleLog {
 		return nil
 	}
 	return provider.ConsoleLogReport()
+}
+
+// resetConsoleLogs clears the driver's captured-console buffer if it
+// supports it. Called at flow start so pre-flow events (driver
+// construction's initial navigation) are discarded — only events the
+// flow's own steps trigger are included in the per-flow report.
+func resetConsoleLogs(d core.Driver) {
+	if provider, ok := core.Unwrap(d).(consoleLogReporter); ok {
+		provider.ClearConsoleLogReport()
+	}
+}
+
+// jsErrorSummary returns a human-readable string listing the error- and
+// exception-level entries in a captured console buffer, or "" if there are
+// none. Used by the failOnConsoleError flow config to produce the failure
+// message. Mirrors what `assertNoJSErrors` produces.
+func jsErrorSummary(logs []report.ConsoleLog) string {
+	if len(logs) == 0 {
+		return ""
+	}
+	var errs []string
+	for _, e := range logs {
+		if e.Level == "error" || e.Level == "exception" {
+			errs = append(errs, fmt.Sprintf("[%s] %s", e.Level, e.Message))
+		}
+	}
+	if len(errs) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("failOnConsoleError: %d JS error(s) detected:\n%s",
+		len(errs), strings.Join(errs, "\n"))
 }
