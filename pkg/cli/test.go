@@ -131,6 +131,11 @@ Examples:
 			Usage:   "Browser to use: chrome, chromium, or path to binary (web only)",
 			EnvVars: []string{"MAESTRO_BROWSER"},
 		},
+		&cli.StringFlag{
+			Name:    "user-data-dir",
+			Usage:   "Chrome user-data-dir for a persistent profile across runs (web only). Cookies / localStorage / extensions are reused.",
+			EnvVars: []string{"MAESTRO_USER_DATA_DIR"},
+		},
 
 		// Driver settings
 		&cli.IntFlag{
@@ -444,8 +449,9 @@ type RunConfig struct {
 
 	// Execution
 	Continuous bool
-	Headed  bool   // Show browser window (web only, default is headless)
-	Browser string // chrome, chromium, or path to binary (web only)
+	Headed      bool   // Show browser window (web only, default is headless)
+	Browser     string // chrome, chromium, or path to binary (web only)
+	UserDataDir string // Persistent Chrome profile directory (web only)
 
 	// Device
 	Platform string
@@ -639,6 +645,7 @@ func runTest(c *cli.Context) error {
 		Continuous:         getBool("continuous"),
 		Headed:             getBool("headed"),
 		Browser:            getString("browser"),
+		UserDataDir:        getString("user-data-dir"),
 		Platform:           getString("platform"),
 		Devices:            parseDevices(getString("device")),
 		Verbose:            getBool("verbose"),
