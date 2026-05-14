@@ -997,10 +997,28 @@ func TestParse_SetAirplaneModeScalarValues(t *testing.T) {
 	}
 }
 
+func TestParse_SetAirplaneModeInterpolationCarriedThrough(t *testing.T) {
+	// Variable-interpolated `enabled:` should parse without error and reach the
+	// step as a string in EnabledRaw. Resolution to bool happens at execute time.
+	flow, err := Parse([]byte(`- setAirplaneMode: {enabled: "${OFFLINE}"}`), "test.yaml")
+	if err != nil {
+		t.Fatalf("expected no parse error, got %v", err)
+	}
+	if len(flow.Steps) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(flow.Steps))
+	}
+	step := flow.Steps[0].(*SetAirplaneModeStep)
+	got, ok := step.EnabledRaw.(string)
+	if !ok || got != "${OFFLINE}" {
+		t.Errorf("EnabledRaw=%v (%T), want %q (string)", step.EnabledRaw, step.EnabledRaw, "${OFFLINE}")
+	}
+}
+
 func TestIsStepType(t *testing.T) {
 	validTypes := []string{
 		"tapOn", "doubleTapOn", "longPressOn", "tapOnPoint", "swipe", "scroll",
-		"scrollUntilVisible", "back", "hideKeyboard", "acceptAlert", "dismissAlert",
+		"scrollUntilVisible", "back", "hideKeyboard", "openNotifications",
+		"acceptAlert", "dismissAlert",
 		"inputText", "inputRandom", "inputRandomEmail", "inputRandomNumber",
 		"inputRandomPersonName", "inputRandomText",
 		"eraseText", "copyTextFrom", "pasteText", "setClipboard", "assertVisible",
@@ -1010,7 +1028,7 @@ func TestIsStepType(t *testing.T) {
 		"setLocation", "setOrientation", "setAirplaneMode", "toggleAirplaneMode",
 		"travel", "openLink", "openBrowser", "repeat", "retry", "runFlow",
 		"runScript", "evalScript", "takeScreenshot", "startRecording", "stopRecording",
-		"addMedia", "pressKey", "waitForAnimationToEnd", "defineVariables",
+		"addMedia", "removeMedia", "pressKey", "waitForAnimationToEnd", "defineVariables",
 	}
 
 	for _, st := range validTypes {
@@ -1183,7 +1201,9 @@ func TestParse_DecodeErrors(t *testing.T) {
 		{"clearState invalid", `- clearState: {appId: [invalid]}`},
 		{"setLocation invalid", `- setLocation: {latitude: [invalid]}`},
 		{"setOrientation invalid", `- setOrientation: {orientation: [invalid]}`},
-		{"setAirplaneMode invalid mapping", `- setAirplaneMode: {enabled: "not a bool"}`},
+		// `enabled:` now accepts strings (for ${VAR} interpolation), so the
+		// "not a bool" form is no longer a parse-time error — it resolves to
+		// false at execute time.
 		{"setAirplaneMode invalid scalar", `- setAirplaneMode: foobar`},
 		{"travel invalid", `- travel: {points: "not an array"}`},
 		{"openLink invalid", `- openLink: {link: [invalid]}`},

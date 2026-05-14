@@ -18,6 +18,7 @@ const (
 	StepScrollUntilVisible StepType = "scrollUntilVisible"
 	StepBack               StepType = "back"
 	StepHideKeyboard       StepType = "hideKeyboard"
+	StepOpenNotifications  StepType = "openNotifications"
 	StepAcceptAlert        StepType = "acceptAlert"
 	StepDismissAlert       StepType = "dismissAlert"
 
@@ -103,6 +104,7 @@ const (
 	StepStartRecording StepType = "startRecording"
 	StepStopRecording  StepType = "stopRecording"
 	StepAddMedia       StepType = "addMedia"
+	StepRemoveMedia    StepType = "removeMedia"
 
 	// Other
 	StepPressKey              StepType = "pressKey"
@@ -149,6 +151,7 @@ type TapOnStep struct {
 	LongPress             bool     `yaml:"longPress"`
 	Repeat                int      `yaml:"repeat"`
 	DelayMs               int      `yaml:"delay"`
+	DurationMs            int      `yaml:"duration"`
 	Point                 string   `yaml:"point"`
 	RetryTapIfNoChange    *bool    `yaml:"retryTapIfNoChange"`
 	WaitUntilVisible      *bool    `yaml:"waitUntilVisible"`
@@ -168,6 +171,7 @@ type DoubleTapOnStep struct {
 type LongPressOnStep struct {
 	BaseStep              `yaml:",inline"`
 	Selector              Selector `yaml:",inline"`
+	DurationMs            int      `yaml:"duration"`
 	RetryTapIfNoChange    *bool    `yaml:"retryTapIfNoChange"`
 	WaitUntilVisible      *bool    `yaml:"waitUntilVisible"`
 	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs"`
@@ -181,6 +185,7 @@ type TapOnPointStep struct {
 	Point                 string `yaml:"point"`
 	LongPress             bool   `yaml:"longPress"`
 	Repeat                int    `yaml:"repeat"`
+	DurationMs            int    `yaml:"duration"`
 	RetryTapIfNoChange    *bool  `yaml:"retryTapIfNoChange"`
 	WaitToSettleTimeoutMs int    `yaml:"waitToSettleTimeoutMs"`
 }
@@ -226,6 +231,12 @@ type BackStep struct {
 
 // HideKeyboardStep hides the keyboard.
 type HideKeyboardStep struct {
+	BaseStep `yaml:",inline"`
+}
+
+// OpenNotificationsStep pulls down the Android notification shade.
+// Android-only (no-op on iOS).
+type OpenNotificationsStep struct {
 	BaseStep `yaml:",inline"`
 }
 
@@ -433,9 +444,15 @@ type SetOrientationStep struct {
 }
 
 // SetAirplaneModeStep sets airplane mode.
+//
+// YAML accepts either a bool (`enabled: true`) or a string that may contain
+// variable interpolation (`enabled: ${OFFLINE}`). EnabledRaw captures the raw
+// YAML scalar; the executor's variable-expansion pass writes the resolved
+// boolean into Enabled before the driver runs the step.
 type SetAirplaneModeStep struct {
-	BaseStep `yaml:",inline"`
-	Enabled  bool `yaml:"enabled"`
+	BaseStep   `yaml:",inline"`
+	Enabled    bool `yaml:"-"`
+	EnabledRaw any  `yaml:"enabled"`
 }
 
 // ToggleAirplaneModeStep toggles airplane mode.
@@ -734,6 +751,11 @@ type StopRecordingStep struct {
 type AddMediaStep struct {
 	BaseStep `yaml:",inline"`
 	Files    []string `yaml:"files"`
+}
+
+// RemoveMediaStep clears media added by addMedia (Android: MediaStore index).
+type RemoveMediaStep struct {
+	BaseStep `yaml:",inline"`
 }
 
 // ============================================

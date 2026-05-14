@@ -727,8 +727,44 @@ func (d *Driver) back(step *flow.BackStep) *core.CommandResult {
 	return successResult("Navigated back", nil)
 }
 
-// pressKey presses a keyboard key.
+// pressKey presses a keyboard key, optionally combined with modifiers via
+// "+" syntax (e.g. "Ctrl+S", "Cmd+Shift+P"). The last token is the main key;
+// preceding tokens are modifiers held down while the main key is pressed.
 func (d *Driver) pressKey(step *flow.PressKeyStep) *core.CommandResult {
+	tokens := strings.Split(step.Key, "+")
+	for i := range tokens {
+		tokens[i] = strings.TrimSpace(tokens[i])
+	}
+
+	if len(tokens) > 1 {
+		mainName := tokens[len(tokens)-1]
+		mainKey := mapKey(mainName)
+		if mainKey == 0 && len(mainName) == 1 {
+			mainKey = input.Key(strings.ToLower(mainName)[0])
+		}
+		if mainKey == 0 {
+			return errorResult(fmt.Errorf("unknown key: %s", mainName), fmt.Sprintf("Unknown key in combo: %s", mainName))
+		}
+
+		var modifiers []input.Key
+		for _, mod := range tokens[:len(tokens)-1] {
+			m := mapModifier(mod)
+			if m == 0 {
+				return errorResult(fmt.Errorf("unknown modifier: %s", mod), fmt.Sprintf("Unknown modifier: %s", mod))
+			}
+			modifiers = append(modifiers, m)
+		}
+
+		ka := d.page.KeyActions()
+		ka = ka.Press(modifiers...)
+		ka = ka.Type(mainKey)
+		ka = ka.Release(modifiers...)
+		if err := ka.Do(); err != nil {
+			return errorResult(err, fmt.Sprintf("Failed to press combo: %s", step.Key))
+		}
+		return successResult(fmt.Sprintf("Pressed combo: %s", step.Key), nil)
+	}
+
 	key := mapKey(step.Key)
 	if key == 0 {
 		return errorResult(fmt.Errorf("unknown key: %s", step.Key), "Unknown key")
@@ -739,6 +775,22 @@ func (d *Driver) pressKey(step *flow.PressKeyStep) *core.CommandResult {
 	}
 
 	return successResult(fmt.Sprintf("Pressed key: %s", step.Key), nil)
+}
+
+// mapModifier maps a modifier name to its left-side input.Key.
+// Accepts "ctrl", "control", "shift", "alt", "option", "meta", "cmd", "command", "win".
+func mapModifier(name string) input.Key {
+	switch strings.ToLower(name) {
+	case "ctrl", "control":
+		return input.ControlLeft
+	case "shift":
+		return input.ShiftLeft
+	case "alt", "option":
+		return input.AltLeft
+	case "meta", "cmd", "command", "win":
+		return input.MetaLeft
+	}
+	return 0
 }
 
 // launchApp navigates to the app URL.

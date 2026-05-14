@@ -223,7 +223,7 @@ func isStepType(key string) bool {
 	switch StepType(key) {
 	case StepTapOn, StepDoubleTapOn, StepLongPressOn, StepTapOnPoint,
 		StepSwipe, StepScroll, StepScrollUntilVisible, StepBack, StepHideKeyboard,
-		StepAcceptAlert, StepDismissAlert,
+		StepOpenNotifications, StepAcceptAlert, StepDismissAlert,
 		StepInputText, StepInputRandom, StepInputRandomEmail, StepInputRandomNumber,
 		StepInputRandomPersonName, StepInputRandomText,
 		StepEraseText, StepCopyTextFrom, StepPasteText, StepSetClipboard,
@@ -240,7 +240,7 @@ func isStepType(key string) bool {
 		StepOpenTab, StepSwitchTab, StepCloseTab,
 		StepMockNetwork, StepBlockNetwork, StepSetNetworkConditions, StepWaitForRequest, StepClearNetworkMocks,
 		StepTakeScreenshot, StepStartRecording,
-		StepStopRecording, StepAddMedia, StepPressKey, StepWaitForAnimationToEnd,
+		StepStopRecording, StepAddMedia, StepRemoveMedia, StepPressKey, StepWaitForAnimationToEnd,
 		StepDefineVariables:
 		return true
 	}
@@ -323,6 +323,9 @@ func decodeStep(stepType StepType, valueNode *yaml.Node, sourcePath string) (Ste
 
 	case StepHideKeyboard:
 		return &HideKeyboardStep{BaseStep: BaseStep{StepType: stepType}}, nil
+
+	case StepOpenNotifications:
+		return &OpenNotificationsStep{BaseStep: BaseStep{StepType: stepType}}, nil
 
 	case StepAcceptAlert:
 		return &AcceptAlertStep{BaseStep: BaseStep{StepType: stepType}}, nil
@@ -565,6 +568,11 @@ func decodeStep(stepType StepType, valueNode *yaml.Node, sourcePath string) (Ste
 			}
 		} else if err := valueNode.Decode(&s); err != nil {
 			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		// If `enabled:` was a literal bool, copy it into Enabled now so flows
+		// without variable interpolation work without the expand pass.
+		if b, ok := s.EnabledRaw.(bool); ok {
+			s.Enabled = b
 		}
 		s.StepType = stepType
 		return &s, nil
@@ -859,6 +867,9 @@ func decodeStep(stepType StepType, valueNode *yaml.Node, sourcePath string) (Ste
 		}
 		s.StepType = stepType
 		return &s, nil
+
+	case StepRemoveMedia:
+		return &RemoveMediaStep{BaseStep: BaseStep{StepType: stepType}}, nil
 
 	case StepPressKey:
 		var s PressKeyStep

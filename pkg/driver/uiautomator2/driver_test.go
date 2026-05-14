@@ -669,6 +669,116 @@ func TestExecuteTapOnPointError(t *testing.T) {
 	}
 }
 
+func TestExecuteTapOnPointWithDuration(t *testing.T) {
+	client := &MockUIA2Client{}
+	driver := New(client, nil, nil)
+
+	step := &flow.TapOnPointStep{X: 100, Y: 200, DurationMs: 500}
+	result := driver.Execute(step)
+
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if len(client.clickCalls) != 0 {
+		t.Errorf("did not expect Click; duration should route to LongClick. Click calls: %d", len(client.clickCalls))
+	}
+	if len(client.longClickCalls) != 1 {
+		t.Fatalf("expected 1 LongClick call, got %d", len(client.longClickCalls))
+	}
+	got := client.longClickCalls[0]
+	if got.X != 100 || got.Y != 200 || got.Duration != 500 {
+		t.Errorf("LongClick = (%d,%d,%d), want (100,200,500)", got.X, got.Y, got.Duration)
+	}
+}
+
+func TestExecuteOpenNotifications(t *testing.T) {
+	shell := &MockShellExecutor{}
+	driver := New(&MockUIA2Client{}, nil, shell)
+
+	step := &flow.OpenNotificationsStep{}
+	step.StepType = flow.StepOpenNotifications
+	result := driver.Execute(step)
+
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if len(shell.commands) != 1 || shell.commands[0] != "cmd statusbar expand-notifications" {
+		t.Errorf("expected `cmd statusbar expand-notifications`, got %v", shell.commands)
+	}
+}
+
+func TestExecuteOpenNotificationsShellError(t *testing.T) {
+	shell := &MockShellExecutor{err: errors.New("permission denied")}
+	driver := New(&MockUIA2Client{}, nil, shell)
+
+	step := &flow.OpenNotificationsStep{}
+	step.StepType = flow.StepOpenNotifications
+	result := driver.Execute(step)
+
+	if result.Success {
+		t.Error("expected failure when shell errors")
+	}
+}
+
+func TestExecuteRemoveMedia(t *testing.T) {
+	shell := &MockShellExecutor{}
+	driver := New(&MockUIA2Client{}, nil, shell)
+
+	step := &flow.RemoveMediaStep{}
+	step.StepType = flow.StepRemoveMedia
+	result := driver.Execute(step)
+
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	// Both providers attempted; mock returns success for both.
+	if len(shell.commands) != 2 {
+		t.Errorf("expected 2 pm clear attempts, got %d: %v", len(shell.commands), shell.commands)
+	}
+}
+
+func TestExecuteRemoveMediaNoShell(t *testing.T) {
+	driver := New(&MockUIA2Client{}, nil, nil)
+
+	step := &flow.RemoveMediaStep{}
+	step.StepType = flow.StepRemoveMedia
+	result := driver.Execute(step)
+
+	if result.Success {
+		t.Error("expected failure when no shell executor")
+	}
+}
+
+func TestExecuteOpenNotificationsNoShell(t *testing.T) {
+	driver := New(&MockUIA2Client{}, nil, nil)
+
+	step := &flow.OpenNotificationsStep{}
+	step.StepType = flow.StepOpenNotifications
+	result := driver.Execute(step)
+
+	if result.Success {
+		t.Error("expected failure when no shell executor")
+	}
+}
+
+func TestExecuteTapOnPointWithLongPress(t *testing.T) {
+	client := &MockUIA2Client{}
+	driver := New(client, nil, nil)
+
+	step := &flow.TapOnPointStep{X: 50, Y: 75, LongPress: true}
+	result := driver.Execute(step)
+
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if len(client.longClickCalls) != 1 {
+		t.Fatalf("expected 1 LongClick call, got %d", len(client.longClickCalls))
+	}
+	if client.longClickCalls[0].Duration != 1000 {
+		t.Errorf("default longPress duration = %d, want 1000", client.longClickCalls[0].Duration)
+	}
+}
+
 func TestExecuteBack(t *testing.T) {
 	client := &MockUIA2Client{}
 	driver := New(client, nil, nil)

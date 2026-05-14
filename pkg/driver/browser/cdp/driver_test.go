@@ -1081,6 +1081,36 @@ func TestMapKey(t *testing.T) {
 	}
 }
 
+func TestMapModifier(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"ctrl", true},
+		{"control", true},
+		{"shift", true},
+		{"alt", true},
+		{"option", true},
+		{"meta", true},
+		{"cmd", true},
+		{"command", true},
+		{"win", true},
+		{"CTRL", true},
+		{"unknown", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		got := mapModifier(tt.name)
+		if tt.want && got == 0 {
+			t.Errorf("mapModifier(%q) returned 0, expected a key", tt.name)
+		}
+		if !tt.want && got != 0 {
+			t.Errorf("mapModifier(%q) returned %v, expected 0", tt.name, got)
+		}
+	}
+}
+
 func TestConvertToKeys(t *testing.T) {
 	keys := convertToKeys("abc")
 	if len(keys) != 3 {

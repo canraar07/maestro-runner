@@ -121,10 +121,23 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		return successResult(fmt.Sprintf("Tapped at relative point (%d, %d) on element", x, y), info)
 	}
 
+	x, y := info.Bounds.Center()
+
+	// If duration is set (or longPress: true), hold the press for that long.
+	if step.DurationMs > 0 || step.LongPress {
+		duration := step.DurationMs
+		if duration <= 0 {
+			duration = 1000
+		}
+		if err := d.client.LongClick(x, y, duration); err != nil {
+			return errorResult(err, fmt.Sprintf("Failed to press for %dms: %v", duration, err))
+		}
+		return successResult("Pressed on element", info)
+	}
+
 	// Always use coordinate-based tap (not accessibility performAction).
 	// Coordinate taps simulate real touch events, which work reliably for
 	// repeated taps on the same button and custom click handlers.
-	x, y := info.Bounds.Center()
 	if err := d.client.Click(x, y); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to tap at coordinates: %v", err))
 	}
@@ -211,7 +224,10 @@ func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
 		return errorResult(err, fmt.Sprintf("Element not found: %v", err))
 	}
 
-	duration := 1000 // default 1 second
+	duration := step.DurationMs
+	if duration <= 0 {
+		duration = 1000 // default 1 second
+	}
 
 	x, y := info.Bounds.Center()
 	if err := d.client.LongClick(x, y, duration); err != nil {
@@ -238,6 +254,17 @@ func (d *Driver) tapOnPoint(step *flow.TapOnPointStep) *core.CommandResult {
 
 	if x == 0 && y == 0 {
 		return errorResult(fmt.Errorf("no point specified"), "Either point or x/y coordinates required")
+	}
+
+	if step.DurationMs > 0 || step.LongPress {
+		duration := step.DurationMs
+		if duration <= 0 {
+			duration = 1000
+		}
+		if err := d.client.LongClick(x, y, duration); err != nil {
+			return errorResult(err, fmt.Sprintf("Failed to press at point for %dms: %v", duration, err))
+		}
+		return successResult(fmt.Sprintf("Pressed at (%d, %d)", x, y), nil)
 	}
 
 	if err := d.client.Click(x, y); err != nil {
@@ -875,6 +902,16 @@ func (d *Driver) pressKey(step *flow.PressKeyStep) *core.CommandResult {
 	}
 
 	return successResult(fmt.Sprintf("Pressed key: %s", key), nil)
+}
+
+func (d *Driver) openNotifications(_ *flow.OpenNotificationsStep) *core.CommandResult {
+	if d.device == nil {
+		return errorResult(fmt.Errorf("no shell executor"), "openNotifications requires shell access")
+	}
+	if _, err := d.device.Shell("cmd statusbar expand-notifications"); err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to open notification shade: %v", err))
+	}
+	return successResult("Opened notification shade", nil)
 }
 
 // ============================================================================
@@ -1562,6 +1599,30 @@ func (d *Driver) addMedia(step *flow.AddMediaStep) *core.CommandResult {
 	}
 
 	return successResult(fmt.Sprintf("Added %d media files", len(step.Files)), nil)
+}
+
+func (d *Driver) removeMedia(_ *flow.RemoveMediaStep) *core.CommandResult {
+	if d.device == nil {
+		return errorResult(fmt.Errorf("device not configured"), "removeMedia requires device access")
+	}
+
+	var lastErr error
+	cleared := false
+	for _, pkg := range []string{
+		"com.google.android.providers.media.module",
+		"com.android.providers.media",
+	} {
+		if _, err := d.device.Shell("pm clear " + pkg); err == nil {
+			cleared = true
+		} else {
+			lastErr = err
+		}
+	}
+	if !cleared {
+		return errorResult(lastErr, fmt.Sprintf("Failed to clear media providers: %v", lastErr))
+	}
+
+	return successResult("Cleared MediaStore index", nil)
 }
 
 func (d *Driver) startRecording(step *flow.StartRecordingStep) *core.CommandResult {

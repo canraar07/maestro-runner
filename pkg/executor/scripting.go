@@ -501,6 +501,17 @@ func (se *ScriptEngine) withEnvVars(env map[string]string) func() {
 	}
 }
 
+// parseBoolExpr converts the resolved value of an `enabled:` argument into a
+// boolean. Accepts "true"/"false", "enabled"/"disabled", "on"/"off",
+// "yes"/"no", "1"/"0" (case-insensitive); anything else is treated as false.
+func parseBoolExpr(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true", "enabled", "on", "yes", "1":
+		return true
+	}
+	return false
+}
+
 // ParseInt parses an integer from string, supporting variable expansion.
 func (se *ScriptEngine) ParseInt(s string, defaultVal int) int {
 	s = se.ExpandVariables(s)
@@ -538,6 +549,11 @@ func (se *ScriptEngine) ExpandStep(step flow.Step) {
 		}
 	case *flow.ScrollUntilVisibleStep:
 		s.Element = *se.expandSelector(&s.Element)
+		s.Direction = se.ExpandVariables(s.Direction)
+	case *flow.SetAirplaneModeStep:
+		if str, ok := s.EnabledRaw.(string); ok {
+			s.Enabled = parseBoolExpr(se.ExpandVariables(str))
+		}
 	case *flow.CopyTextFromStep:
 		s.Selector = *se.expandSelector(&s.Selector)
 	case *flow.LaunchAppStep:

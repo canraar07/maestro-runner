@@ -230,6 +230,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.back(s)
 	case *flow.PressKeyStep:
 		result = d.pressKey(s)
+	case *flow.OpenNotificationsStep:
+		result = d.openNotifications(s)
 
 	// App lifecycle
 	case *flow.LaunchAppStep:
@@ -284,6 +286,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.startRecording(s)
 	case *flow.StopRecordingStep:
 		result = d.stopRecording(s)
+	case *flow.RemoveMediaStep:
+		result = d.removeMedia(s)
 	case *flow.AddMediaStep:
 		result = d.addMedia(s)
 

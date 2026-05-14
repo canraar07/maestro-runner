@@ -55,6 +55,20 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		return successResult(fmt.Sprintf("Tapped at relative point (%.0f, %.0f) on element", x, y), info)
 	}
 
+	// If duration is set (or longPress: true), hold the press for that long.
+	if step.DurationMs > 0 || step.LongPress {
+		durationSec := float64(step.DurationMs) / 1000.0
+		if durationSec <= 0 {
+			durationSec = 1.0
+		}
+		x := float64(info.Bounds.X + info.Bounds.Width/2)
+		y := float64(info.Bounds.Y + info.Bounds.Height/2)
+		if err := d.client.LongPress(x, y, durationSec); err != nil {
+			return errorResult(err, fmt.Sprintf("Press for %.2fs failed", durationSec))
+		}
+		return successResult("Pressed element", info)
+	}
+
 	// Determine if element is a text field (needs focus verification)
 	isTextField := strings.Contains(info.Class, "TextField")
 
@@ -129,7 +143,10 @@ func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
 	x := float64(info.Bounds.X + info.Bounds.Width/2)
 	y := float64(info.Bounds.Y + info.Bounds.Height/2)
 
-	duration := 1.0 // default 1 second
+	duration := float64(step.DurationMs) / 1000.0
+	if duration <= 0 {
+		duration = 1.0 // default 1 second
+	}
 
 	if err := d.client.LongPress(x, y, duration); err != nil {
 		return errorResult(err, "Long press failed")
@@ -156,6 +173,17 @@ func (d *Driver) tapOnPoint(step *flow.TapOnPointStep) *core.CommandResult {
 	} else {
 		x = float64(step.X)
 		y = float64(step.Y)
+	}
+
+	if step.DurationMs > 0 || step.LongPress {
+		durationSec := float64(step.DurationMs) / 1000.0
+		if durationSec <= 0 {
+			durationSec = 1.0
+		}
+		if err := d.client.LongPress(x, y, durationSec); err != nil {
+			return errorResult(err, fmt.Sprintf("Press at point for %.2fs failed", durationSec))
+		}
+		return successResult(fmt.Sprintf("Pressed at (%.0f, %.0f)", x, y), nil)
 	}
 
 	if err := d.client.Tap(x, y); err != nil {
