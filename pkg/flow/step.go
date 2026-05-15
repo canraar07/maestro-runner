@@ -769,6 +769,11 @@ type PressKeyStep struct {
 }
 
 // WaitForAnimationToEndStep waits for animations.
+//
+// Algorithm (matches upstream Maestro): take two consecutive screenshots, if
+// fewer than 0.5% of pixels differ, the screen is considered static. Otherwise
+// poll until static or timeout. Timeout comes from the inlined BaseStep
+// (`timeout:` YAML key); defaults to 15s when unset.
 type WaitForAnimationToEndStep struct {
 	BaseStep `yaml:",inline"`
 }

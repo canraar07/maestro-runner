@@ -1061,9 +1061,14 @@ func (d *Driver) waitUntilNotVisible(sel flow.Selector, timeoutMs int) *core.Com
 	)
 }
 
-// waitForAnimationToEnd waits for the DOM to stabilize.
+// waitForAnimationToEnd waits for the DOM to stabilize. Honors step.TimeoutMs;
+// falls back to 15s (matches the upstream Maestro default) when unset.
 func (d *Driver) waitForAnimationToEnd(step *flow.WaitForAnimationToEndStep) *core.CommandResult {
-	p := d.page.Timeout(10 * time.Second)
+	timeoutMs := step.TimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = 15000
+	}
+	p := d.page.Timeout(time.Duration(timeoutMs) * time.Millisecond)
 	if err := p.WaitDOMStable(300*time.Millisecond, 0); err != nil {
 		return errorResult(err, "DOM did not stabilize")
 	}

@@ -1,9 +1,13 @@
 package uiautomator2
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,6 +36,7 @@ type MockUIA2Client struct {
 	activeElementFunc  func() (*uiautomator2.Element, error)
 	sourceFunc         func() (string, error)
 	sendKeyActionsFunc func(text string) error
+	screenshotFunc     func() ([]byte, error)
 
 	// Tracking
 	clickCalls          []struct{ X, Y int }
@@ -138,6 +143,9 @@ func (m *MockUIA2Client) SendKeyActions(text string) error {
 }
 
 func (m *MockUIA2Client) Screenshot() ([]byte, error) {
+	if m.screenshotFunc != nil {
+		return m.screenshotFunc()
+	}
 	return m.screenshotData, m.screenshotErr
 }
 
@@ -689,6 +697,84 @@ func TestExecuteTapOnPointWithDuration(t *testing.T) {
 	if got.X != 100 || got.Y != 200 || got.Duration != 500 {
 		t.Errorf("LongClick = (%d,%d,%d), want (100,200,500)", got.X, got.Y, got.Duration)
 	}
+}
+
+func TestWaitForAnimationToEnd_StaticReturnsImmediately(t *testing.T) {
+	// Encode a tiny solid-colour PNG; both screenshots return identical bytes.
+	buf := encodeTinyPNG(t, 10, 10, 0x80)
+	client := &MockUIA2Client{screenshotData: buf}
+	driver := New(client, nil, nil)
+
+	step := &flow.WaitForAnimationToEndStep{}
+	step.TimeoutMs = 1000
+	step.StepType = flow.StepWaitForAnimationToEnd
+
+	start := time.Now()
+	result := driver.Execute(step)
+	elapsed := time.Since(start)
+
+	if !result.Success {
+		t.Fatalf("expected success, got %v", result.Error)
+	}
+	// Static screen should return in under one timeout's worth.
+	if elapsed > 800*time.Millisecond {
+		t.Errorf("static screen returned after %v, want < 800ms", elapsed)
+	}
+	if !strings.Contains(result.Message, "Animation ended") {
+		t.Errorf("message = %q, want it to contain 'Animation ended'", result.Message)
+	}
+}
+
+func TestWaitForAnimationToEnd_HonoursTimeout(t *testing.T) {
+	// Screen never settles: alternate between two distinct images on every call.
+	imgA := encodeTinyPNG(t, 10, 10, 0x00)
+	imgB := encodeTinyPNG(t, 10, 10, 0xFF)
+	var calls int
+	client := &MockUIA2Client{
+		screenshotFunc: func() ([]byte, error) {
+			calls++
+			if calls%2 == 0 {
+				return imgB, nil
+			}
+			return imgA, nil
+		},
+	}
+	driver := New(client, nil, nil)
+
+	step := &flow.WaitForAnimationToEndStep{}
+	step.TimeoutMs = 500
+	step.StepType = flow.StepWaitForAnimationToEnd
+
+	start := time.Now()
+	result := driver.Execute(step)
+	elapsed := time.Since(start)
+
+	if !result.Success {
+		t.Fatalf("step should soft-pass even on timeout, got error %v", result.Error)
+	}
+	if elapsed < 450*time.Millisecond {
+		t.Errorf("returned after %v — should have polled until ~500ms timeout", elapsed)
+	}
+	if !strings.Contains(result.Message, "did not settle") {
+		t.Errorf("message = %q, want it to contain 'did not settle'", result.Message)
+	}
+}
+
+// encodeTinyPNG produces a small solid-fill PNG. Used to drive the
+// screenshot-comparison animation loop deterministically.
+func encodeTinyPNG(t *testing.T, w, h int, gray byte) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, color.RGBA{R: gray, G: gray, B: gray, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
 }
 
 func TestExecuteOpenNotifications(t *testing.T) {

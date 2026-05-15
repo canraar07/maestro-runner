@@ -1235,14 +1235,32 @@ func (d *Driver) waitUntil(step *flow.WaitUntilStep) *core.CommandResult {
 	}
 }
 
-func (d *Driver) waitForAnimationToEnd(_ *flow.WaitForAnimationToEndStep) *core.CommandResult {
-	// NOTE: waitForAnimationToEnd is not fully implemented.
-	// Maestro uses screenshot comparison which is complex to implement correctly.
-	// For now, we pass this step with a warning.
-	return &core.CommandResult{
-		Success: true,
-		Message: "WARNING: waitForAnimationToEnd is not fully implemented - step passed without animation check",
+func (d *Driver) waitForAnimationToEnd(step *flow.WaitForAnimationToEndStep) *core.CommandResult {
+	timeoutMs := step.TimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = 15000
 	}
+	const threshold = 0.005
+
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	start := time.Now()
+	for time.Now().Before(deadline) {
+		prev, err := d.client.Screenshot()
+		if err != nil {
+			return errorResult(err, fmt.Sprintf("Screenshot failed: %v", err))
+		}
+		curr, err := d.client.Screenshot()
+		if err != nil {
+			return errorResult(err, fmt.Sprintf("Screenshot failed: %v", err))
+		}
+		diff := core.ImageDifference(prev, curr)
+		if diff <= threshold {
+			elapsed := time.Since(start)
+			return successResult(fmt.Sprintf("Animation ended (%.1f%% diff, %dms)", diff*100, elapsed.Milliseconds()), nil)
+		}
+	}
+
+	return successResult(fmt.Sprintf("Animation did not settle within %dms — continuing", timeoutMs), nil)
 }
 
 // Media

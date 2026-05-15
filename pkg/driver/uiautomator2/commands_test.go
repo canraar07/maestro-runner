@@ -996,14 +996,10 @@ func TestStopRecordingSuccess(t *testing.T) {
 // ============================================================================
 
 func TestWaitForAnimationToEndSuccess(t *testing.T) {
-	driver := &Driver{}
-	step := &flow.WaitForAnimationToEndStep{}
-
-	result := driver.waitForAnimationToEnd(step)
-
-	if !result.Success {
-		t.Errorf("expected success, got error: %v", result.Error)
-	}
+	// Covered by TestWaitForAnimationToEnd_* in driver_test.go (uses a real
+	// MockUIA2Client with screenshot data). The old stub-based test predates
+	// the screenshot-comparison implementation and is no longer meaningful.
+	t.Skip("superseded by TestWaitForAnimationToEnd_StaticReturnsImmediately / _HonoursTimeout")
 }
 
 // ============================================================================
