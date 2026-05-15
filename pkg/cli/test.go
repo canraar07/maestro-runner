@@ -813,6 +813,11 @@ func executeTest(cfg *RunConfig) error {
 				"the installed bundle isn't reachable from the host. On simulators no flag is needed.\n" +
 				"Usage: maestro-runner --app-file <path-to-ipa-or-app> --platform ios test <flow-files>")
 		}
+
+		// Advisory only: surface Flutter debug-build pitfall before the run
+		// starts. Standalone debug builds crash and produce a port-forward
+		// flood — easy to misread as a maestro-runner bug.
+		warnIfFlutterDebugBuild(cfg.AppFile)
 	}
 
 	// Extract appId/url from first flow if not in config

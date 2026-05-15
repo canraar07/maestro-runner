@@ -36,7 +36,22 @@ type Driver struct {
 
 	// Selector validation dedup
 	warnedFields map[string]bool
+
+	// Crash-loop detection. When the app under test keeps dying immediately
+	// after launch (debug builds, signing mismatch, runtime crash on startup)
+	// we get a flood of "app not running" / "session lost" errors. Without
+	// this gate, the runner would chew through the full flow-level timeout
+	// retrying every step against a dead app.
+	appDeathCount    int
+	appDeathFirstAt  time.Time
+	crashAbortReason string
 }
+
+// Crash-loop detection thresholds.
+const (
+	crashLoopThreshold  = 4               // N app-death errors → abort
+	crashLoopTimeWindow = 6 * time.Second // ...within this window
+)
 
 // NewDriver creates a new WDA driver.
 func NewDriver(client *Client, info *core.PlatformInfo, udid string) *Driver {
@@ -151,6 +166,18 @@ const (
 func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 	start := time.Now()
 
+	// If we've already detected a crash-loop on this driver, every
+	// subsequent step short-circuits with the same actionable error.
+	// Avoids spamming the user with the same diagnosis on every step.
+	if d.crashAbortReason != "" {
+		return &core.CommandResult{
+			Success:  false,
+			Error:    fmt.Errorf("%s", d.crashAbortReason),
+			Message:  d.crashAbortReason,
+			Duration: time.Since(start),
+		}
+	}
+
 	var result *core.CommandResult
 	switch s := step.(type) {
 	// Tap commands
@@ -256,7 +283,81 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 	}
 
 	result.Duration = time.Since(start)
+	d.trackCrashLoop(result)
 	return result
+}
+
+// trackCrashLoop counts consecutive "app died on launch" failures and trips a
+// circuit-breaker after several within a short window. The follow-up Execute
+// calls then short-circuit with a clear error mentioning the most likely
+// causes — saves the user from waiting out a flow-level timeout staring at
+// "session lost / app not running" errors that all stem from the same root.
+func (d *Driver) trackCrashLoop(result *core.CommandResult) {
+	if d.crashAbortReason != "" {
+		return // already aborted
+	}
+	if result.Success {
+		// Any success resets the counter — the app is alive again.
+		d.appDeathCount = 0
+		return
+	}
+	if !isAppDeathError(result) {
+		return
+	}
+
+	now := time.Now()
+	if d.appDeathCount == 0 || now.Sub(d.appDeathFirstAt) > crashLoopTimeWindow {
+		d.appDeathFirstAt = now
+		d.appDeathCount = 1
+		return
+	}
+	d.appDeathCount++
+	if d.appDeathCount >= crashLoopThreshold {
+		d.crashAbortReason = "Aborting: the app under test appears to be crashing on launch (" +
+			fmt.Sprintf("%d 'app died' / 'session lost' errors in %.1fs).\n",
+				d.appDeathCount, now.Sub(d.appDeathFirstAt).Seconds()) +
+			"Common causes on iOS:\n" +
+			"  • Flutter debug build — rebuild with `flutter build ios --release` or `--profile`.\n" +
+			"  • Code-signing / provisioning mismatch — re-sign with the team ID passed via --team-id.\n" +
+			"  • App crashes immediately on startup — check device logs with `idevicesyslog` (real device)\n" +
+			"    or `xcrun simctl spawn booted log stream` (simulator).\n"
+		log.Printf("[wda] %s", d.crashAbortReason)
+	}
+}
+
+// isAppDeathError matches result messages / error texts that indicate the
+// app under test is no longer running. Patterns drawn from real WDA failure
+// modes observed in #38 and similar repros.
+func isAppDeathError(result *core.CommandResult) bool {
+	if result == nil {
+		return false
+	}
+	combined := result.Message
+	if result.Error != nil {
+		combined += " " + result.Error.Error()
+	}
+	combined = strings.ToLower(combined)
+
+	signals := []string{
+		"application is not in foreground",
+		"application is not running",
+		"app is not running",
+		"application died",
+		"session does not exist",
+		"session is not started",
+		"invalid session id",
+		"could not start app",
+		"failed to launch",
+		"no such session",
+		"connection reset",
+		"connection refused",
+	}
+	for _, s := range signals {
+		if strings.Contains(combined, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // Screenshot captures the current screen as PNG.
