@@ -210,6 +210,12 @@ type SwipeStep struct {
 type ScrollStep struct {
 	BaseStep  `yaml:",inline"`
 	Direction string `yaml:"direction"`
+	// Engine selects the scroll backend on Android.
+	// "" (default) and "adb" → adb input swipe (matches upstream Maestro).
+	// "agent" → driver's existing on-device gesture path (UIA2 server
+	// /appium/gestures/scroll for the uiautomator2 driver, RPC MotionEvent
+	// injection for the devicelab driver). Ignored on iOS/web.
+	Engine string `yaml:"engine"`
 }
 
 // ScrollUntilVisibleStep scrolls until element is visible.
@@ -222,6 +228,8 @@ type ScrollUntilVisibleStep struct {
 	VisibilityPercentage  int      `yaml:"visibilityPercentage"`
 	CenterElement         bool     `yaml:"centerElement"`
 	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs"`
+	// Engine selects the scroll backend. See ScrollStep.Engine.
+	Engine string `yaml:"engine"`
 }
 
 // BackStep presses back.

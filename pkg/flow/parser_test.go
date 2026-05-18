@@ -995,6 +995,50 @@ func TestParse_ScrollUntilVisibleWithAllFields(t *testing.T) {
 	}
 }
 
+// TestParse_ScrollEngineField covers the per-step "engine" opt-in on both
+// scroll and scrollUntilVisible. Default is empty (= adb); "agent" selects
+// the on-device gesture path. Drivers ignore unknown values.
+func TestParse_ScrollEngineField(t *testing.T) {
+	yaml := `
+- scroll:
+    direction: DOWN
+- scroll:
+    direction: DOWN
+    engine: agent
+- scrollUntilVisible:
+    element:
+      id: target
+    engine: agent
+- scrollUntilVisible:
+    element:
+      id: target
+`
+	parsed, err := Parse([]byte(yaml), "test.yaml")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if len(parsed.Steps) != 4 {
+		t.Fatalf("expected 4 steps, got %d", len(parsed.Steps))
+	}
+
+	s0 := parsed.Steps[0].(*ScrollStep)
+	if s0.Engine != "" {
+		t.Errorf("step 0 (default): Engine=%q, want empty", s0.Engine)
+	}
+	s1 := parsed.Steps[1].(*ScrollStep)
+	if s1.Engine != "agent" {
+		t.Errorf("step 1 (opt-in): Engine=%q, want \"agent\"", s1.Engine)
+	}
+	s2 := parsed.Steps[2].(*ScrollUntilVisibleStep)
+	if s2.Engine != "agent" {
+		t.Errorf("step 2 (opt-in): Engine=%q, want \"agent\"", s2.Engine)
+	}
+	s3 := parsed.Steps[3].(*ScrollUntilVisibleStep)
+	if s3.Engine != "" {
+		t.Errorf("step 3 (default): Engine=%q, want empty", s3.Engine)
+	}
+}
+
 func TestParse_WaitUntilStep(t *testing.T) {
 	yaml := `
 - extendedWaitUntil:

@@ -3,6 +3,7 @@ package devicelab
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -659,12 +660,9 @@ func (d *Driver) scroll(step *flow.ScrollStep) *core.CommandResult {
 		return errorResult(err, "Failed to get screen size")
 	}
 
-	area := uiautomator2.NewRect(0, height/8, width, height*3/4)
-
-	if err := d.client.ScrollInArea(area, direction, 0.5, 0); err != nil {
+	if err := d.performScroll(direction, width, height, step.Engine, 0.5); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to scroll: %v", err))
 	}
-
 	return successResult(fmt.Sprintf("Scrolled %s", direction), nil)
 }
 
@@ -689,15 +687,24 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 		return errorResult(err, "Failed to get screen size")
 	}
 
-	area := uiautomator2.NewRect(0, height/8, width, height*3/4)
-
 	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
 		_, info, err := d.findElement(step.Element, true, 1000)
 		if err == nil && info != nil {
-			return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)
+			// The DeviceLab agent returns matches from the full view hierarchy,
+			// including items below the fold in a ScrollView. Verify the element
+			// actually overlaps the viewport before declaring success — otherwise
+			// scrollUntilVisible can short-circuit on iteration 0 without ever
+			// moving the screen.
+			if isElementOnScreen(info, width, height) {
+				return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)
+			}
+		} else if err != nil && !isElementNotFoundError(err) {
+			// Infrastructure failure (dead session, connection refused, etc.):
+			// surface immediately rather than silently looping through all scrolls.
+			return errorResult(err, "Failed to find element")
 		}
 
-		if err := d.client.ScrollInArea(area, direction, 0.3, 0); err != nil {
+		if err := d.performScroll(direction, width, height, step.Engine, 0.3); err != nil {
 			return errorResult(err, fmt.Sprintf("Failed to scroll: %v", err))
 		}
 
@@ -705,6 +712,115 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 
 	return errorResult(fmt.Errorf("element not found"), fmt.Sprintf("Element not found after %d scrolls", maxScrolls))
+}
+
+// performScroll dispatches a scroll gesture using the engine selected by the
+// step. Default ("" or "adb") uses adb input swipe (matches upstream Maestro
+// and is the most reliable path across Android skins). "agent" uses the
+// on-device DeviceLab agent's MotionEvent injection. ADB falls back to the
+// agent (with a warning) when no shell executor is available.
+// percent controls the swipe distance as a fraction of screen dimension.
+func (d *Driver) performScroll(direction string, width, height int, engine string, percent float64) error {
+	useAgent := strings.EqualFold(engine, "agent")
+	if !useAgent {
+		if d.device != nil {
+			return d.scrollByAdb(direction, width, height, percent)
+		}
+		logger.Warn("scroll: ADB shell unavailable, falling back to agent gesture (may be unreliable on some Android skins)")
+	}
+	area := uiautomator2.NewRect(0, height/8, width, height*3/4)
+	return d.client.ScrollInArea(area, agentScrollDirection(direction), percent, scrollDurationMs)
+}
+
+// scrollByAdb issues `adb shell input swipe` over the local shell executor.
+// percent is the swipe distance as a fraction of the screen dimension along
+// the scroll axis. Direction uses Maestro scroll semantics (what becomes
+// visible — "down" reveals content below by swiping the finger UP).
+func (d *Driver) scrollByAdb(direction string, screenWidth, screenHeight int, percent float64) error {
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+	halfV := int(float64(screenHeight) * percent / 2)
+	halfH := int(float64(screenWidth) * percent / 2)
+	var fromX, fromY, toX, toY int
+	switch direction {
+	case "up":
+		fromX, fromY = centerX, centerY-halfV
+		toX, toY = centerX, centerY+halfV
+	case "down":
+		fromX, fromY = centerX, centerY+halfV
+		toX, toY = centerX, centerY-halfV
+	case "left":
+		fromX, fromY = centerX-halfH, centerY
+		toX, toY = centerX+halfH, centerY
+	case "right":
+		fromX, fromY = centerX+halfH, centerY
+		toX, toY = centerX-halfH, centerY
+	default:
+		fromX, fromY = centerX, centerY+halfV
+		toX, toY = centerX, centerY-halfV
+	}
+	cmd := fmt.Sprintf("input swipe %d %d %d %d %d", fromX, fromY, toX, toY, scrollDurationMs)
+	_, err := d.device.Shell(cmd)
+	return err
+}
+
+// scrollDurationMs is the swipe duration (in ms) passed to the DeviceLab
+// agent for scroll gestures. The agent uses it as the total MotionEvent
+// duration; values that are too low (including 0) emit events too fast for
+// Android's input pipeline to register as a scroll.
+const scrollDurationMs = 300
+
+// agentScrollDirection translates Maestro scroll semantics (direction names
+// what becomes visible — "down" reveals content below the current viewport)
+// to the inverted touch-direction semantics the on-device agent currently
+// implements (it swipes the finger in the named direction, which scrolls
+// the viewport the opposite way). When the agent is fixed to honor scroll
+// semantics, this translation should be removed.
+func agentScrollDirection(direction string) string {
+	switch direction {
+	case "down":
+		return "up"
+	case "up":
+		return "down"
+	case "left":
+		return "right"
+	case "right":
+		return "left"
+	default:
+		return direction
+	}
+}
+
+// isElementOnScreen reports whether an element's bounds overlap the visible
+// viewport. Zero-area bounds count as off-screen.
+func isElementOnScreen(info *core.ElementInfo, screenWidth, screenHeight int) bool {
+	b := info.Bounds
+	if b.Width == 0 || b.Height == 0 {
+		return false
+	}
+	return b.X+b.Width > 0 && b.X < screenWidth && b.Y+b.Height > 0 && b.Y < screenHeight
+}
+
+// isElementNotFoundError distinguishes expected "not on screen yet" errors
+// (which scrollUntilVisible should swallow and keep scrolling) from real
+// infrastructure failures that should propagate immediately.
+func isElementNotFoundError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, phrase := range []string{
+		"not found",
+		"no elements match",
+		"no such element",
+		"could not be located",
+		"context deadline exceeded",
+	} {
+		if strings.Contains(msg, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
