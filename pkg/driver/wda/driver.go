@@ -10,6 +10,7 @@ import (
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
+	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
 
 // Driver implements core.Driver using WebDriverAgent for iOS.
@@ -658,6 +659,43 @@ func (d *Driver) findElementQuick(sel flow.Selector, timeoutMs int) (*core.Eleme
 	return d.findElementOnce(sel)
 }
 
+// filterVisibleOrHostingVisible keeps candidates WDA reports visible="true",
+// plus candidates marked visible="false" that nonetheless host at least one
+// visible descendant. The second class covers RN container testIDs and other
+// wrapper views that XCUITest can't classify as accessible but which clearly
+// contain visible content. Hidden-but-still-mounted screens (all descendants
+// invisible) are correctly excluded.
+func filterVisibleOrHostingVisible(candidates []*ParsedElement) []*ParsedElement {
+	out := candidates[:0]
+	for _, c := range candidates {
+		if c.Displayed || HasVisibleDescendant(c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// rescueNote returns a non-empty match note when elem was accepted only
+// because it hosts visible descendants (XCUITest marked the container itself
+// visible="false"). Empty for normal matches.
+func rescueNote(elem *ParsedElement) string {
+	if elem.Displayed {
+		return ""
+	}
+	return "matched via visible descendant (container marked visible=false by XCUITest)"
+}
+
+// selectorLog returns a compact string describing a selector for log lines.
+func selectorLog(sel flow.Selector) string {
+	if sel.ID != "" {
+		return fmt.Sprintf("id=%q", sel.ID)
+	}
+	if sel.Text != "" {
+		return fmt.Sprintf("text=%q", sel.Text)
+	}
+	return sel.Describe()
+}
+
 // buildStateFilter builds WDA predicate conditions for state filters.
 // Returns empty string if no state filters are set.
 func buildStateFilter(sel flow.Selector) string {
@@ -866,14 +904,8 @@ func (d *Driver) resolveRelativeSelector(sel flow.Selector, allElements []*Parse
 		candidates = FilterContainsDescendants(candidates, allElements, sel.ContainsDescendants)
 	}
 
-	// Filter out off-screen elements
-	visible := candidates[:0]
-	for _, c := range candidates {
-		if c.Displayed {
-			visible = append(visible, c)
-		}
-	}
-	candidates = visible
+	// Same phased visibility check as findElementByPageSourceOnce.
+	candidates = filterVisibleOrHostingVisible(candidates)
 
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no elements match selector")
@@ -884,12 +916,17 @@ func (d *Driver) resolveRelativeSelector(sel flow.Selector, allElements []*Parse
 
 	selected := SelectByIndex(candidates, sel.Index)
 
-	return &core.ElementInfo{
+	info := &core.ElementInfo{
 		Text:    selected.Label,
 		Bounds:  selected.Bounds,
 		Enabled: selected.Enabled,
 		Visible: selected.Displayed,
-	}, nil
+	}
+	if note := rescueNote(selected); note != "" {
+		info.MatchNote = note
+		logger.Info("[wda] %s: %s", selectorLog(sel), note)
+	}
+	return info, nil
 }
 
 // findElementByPageSourceOnce performs a single page source search.
@@ -912,14 +949,12 @@ func (d *Driver) findElementByPageSourceOnce(sel flow.Selector) (*core.ElementIn
 
 	candidates := FilterBySelector(allElements, sel)
 
-	// Also filter by WDA's visible attribute
-	visible := candidates[:0]
-	for _, c := range candidates {
-		if c.Displayed {
-			visible = append(visible, c)
-		}
-	}
-	candidates = visible
+	// Phase 1: prefer elements WDA marks visible="true".
+	// Phase 2: rescue elements WDA marked visible="false" *only if* they
+	// host a visible descendant. This recovers React Native <View testID="..">
+	// wrappers (visible content inside, container itself non-accessible) while
+	// still rejecting hidden-but-still-mounted screens (all descendants invisible).
+	candidates = filterVisibleOrHostingVisible(candidates)
 
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no elements match selector")
@@ -934,12 +969,17 @@ func (d *Driver) findElementByPageSourceOnce(sel flow.Selector) (*core.ElementIn
 	// This handles patterns where text labels aren't interactive but their containers are
 	clickableElem := GetClickableElement(selected)
 
-	return &core.ElementInfo{
+	info := &core.ElementInfo{
 		Text:    selected.Label,
 		Bounds:  clickableElem.Bounds,
 		Enabled: selected.Enabled,
 		Visible: selected.Displayed,
-	}, nil
+	}
+	if note := rescueNote(selected); note != "" {
+		info.MatchNote = note
+		logger.Info("[wda] %s: %s", selectorLog(sel), note)
+	}
+	return info, nil
 }
 
 // relativeFilterType identifies which relative filter to apply

@@ -201,7 +201,11 @@ func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult
 		return errorResult(err, fmt.Sprintf("Element not visible: %s", selectorDesc(step.Selector)))
 	}
 
-	return successResult("Element is visible", info)
+	msg := "Element is visible"
+	if info != nil && info.MatchNote != "" {
+		msg = "Element is visible (" + info.MatchNote + ")"
+	}
+	return successResult(msg, info)
 }
 
 func (d *Driver) assertNotVisible(step *flow.AssertNotVisibleStep) *core.CommandResult {
