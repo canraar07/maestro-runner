@@ -729,7 +729,7 @@ func (d *Driver) performScroll(direction string, width, height int, engine strin
 		logger.Warn("scroll: ADB shell unavailable, falling back to agent gesture (may be unreliable on some Android skins)")
 	}
 	area := uiautomator2.NewRect(0, height/8, width, height*3/4)
-	return d.client.ScrollInArea(area, agentScrollDirection(direction), percent, scrollDurationMs)
+	return d.client.ScrollInArea(area, direction, percent, scrollDurationMs)
 }
 
 // scrollByAdb issues `adb shell input swipe` over the local shell executor.
@@ -769,27 +769,6 @@ func (d *Driver) scrollByAdb(direction string, screenWidth, screenHeight int, pe
 // duration; values that are too low (including 0) emit events too fast for
 // Android's input pipeline to register as a scroll.
 const scrollDurationMs = 300
-
-// agentScrollDirection translates Maestro scroll semantics (direction names
-// what becomes visible — "down" reveals content below the current viewport)
-// to the inverted touch-direction semantics the on-device agent currently
-// implements (it swipes the finger in the named direction, which scrolls
-// the viewport the opposite way). When the agent is fixed to honor scroll
-// semantics, this translation should be removed.
-func agentScrollDirection(direction string) string {
-	switch direction {
-	case "down":
-		return "up"
-	case "up":
-		return "down"
-	case "left":
-		return "right"
-	case "right":
-		return "left"
-	default:
-		return direction
-	}
-}
 
 // isElementOnScreen reports whether an element's bounds overlap the visible
 // viewport. Zero-area bounds count as off-screen.
