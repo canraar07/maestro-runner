@@ -32,7 +32,7 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 	// pointer-events:none" cases that visibility doesn't cover, and gives a
 	// short window for state to settle if the page just enabled the control.
 	if err := d.waitForActionable(elem, defaultActionableTimeoutMs); err != nil {
-		return errorResult(err, fmt.Sprintf("Element not actionable: %s", step.Selector.DescribeQuoted()))
+		return errorResult(err, fmt.Sprintf("Element not actionable: %s — %v", step.Selector.DescribeQuoted(), err))
 	}
 
 	// Handle <option> elements: select the option via its parent <select> instead of clicking
@@ -2050,5 +2050,10 @@ func (d *Driver) waitForActionable(elem *rod.Element, timeoutMs int) error {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return fmt.Errorf("element not actionable within %dms (visible + enabled + pointer-events check)", timeoutMs)
+	// Surface the most recent rejection reason for easier debugging.
+	reason := "unknown"
+	if r, err := elem.Eval(`() => String(window.__maestroLastRejection || 'unknown')`); err == nil && r != nil {
+		reason = r.Value.Str()
+	}
+	return fmt.Errorf("element not actionable within %dms (last rejection: %s)", timeoutMs, reason)
 }
