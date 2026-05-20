@@ -2601,3 +2601,422 @@ func TestBuildClickableOnlyStrategies(t *testing.T) {
 		}
 	}
 }
+
+// =============================================================================
+// findScrollableElement — uses client.Source() XML
+// =============================================================================
+
+func TestFindScrollableElement_Single(t *testing.T) {
+	src := `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy>
+  <node class="android.widget.ScrollView" scrollable="true" bounds="[0,100][1080,2300]"/>
+</hierarchy>`
+	client := &richClient{trackingClient: newTrackingClient(), source: src}
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+	info, count := driver.findScrollableElement(1000)
+	if count != 1 {
+		t.Errorf("expected 1 scrollable, got %d", count)
+	}
+	if info == nil || info.Bounds.Width == 0 {
+		t.Errorf("expected non-nil bounds, got %+v", info)
+	}
+}
+
+func TestFindScrollableElement_MultipleReturnsLargest(t *testing.T) {
+	src := `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy>
+  <node class="android.widget.ScrollView" scrollable="true" bounds="[0,0][100,100]"/>
+  <node class="android.widget.ScrollView" scrollable="true" bounds="[0,0][500,500]"/>
+</hierarchy>`
+	client := &richClient{trackingClient: newTrackingClient(), source: src}
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+	info, count := driver.findScrollableElement(1000)
+	if count != 2 {
+		t.Errorf("expected 2 scrollables, got %d", count)
+	}
+	if info == nil || info.Bounds.Width != 500 {
+		t.Errorf("expected largest (500x500), got %+v", info)
+	}
+}
+
+func TestFindScrollableElement_None(t *testing.T) {
+	src := `<?xml version="1.0" encoding="UTF-8"?><hierarchy><node bounds="[0,0][10,10]"/></hierarchy>`
+	client := &richClient{trackingClient: newTrackingClient(), source: src}
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+	// Use short timeout — we expect a miss after polling.
+	info, count := driver.findScrollableElement(100)
+	if info != nil || count != 0 {
+		t.Errorf("expected (nil, 0), got (%+v, %d)", info, count)
+	}
+}
+
+func TestFindScrollableElement_SourceError(t *testing.T) {
+	client := &richClient{trackingClient: newTrackingClient(), sourceErr: errors.New("blocked")}
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+	info, count := driver.findScrollableElement(100)
+	if info != nil || count != 0 {
+		t.Errorf("expected (nil, 0) on source error, got (%+v, %d)", info, count)
+	}
+}
+
+// =============================================================================
+// resolveLauncherActivity / Cached
+// =============================================================================
+
+func TestResolveLauncherActivity_API24_Success(t *testing.T) {
+	shell := &mockShell{out: "com.test.app/com.test.app.MainActivity\n"}
+	driver := New(newTrackingClient(), &core.PlatformInfo{}, shell)
+	got, err := driver.resolveLauncherActivity("com.test.app", 28)
+	if err != nil {
+		t.Fatalf("resolveLauncherActivity: %v", err)
+	}
+	if got != "com.test.app/com.test.app.MainActivity" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestResolveLauncherActivity_API24_NoMatch_FallsBackToDumpsys(t *testing.T) {
+	// First call returns ResolverActivity (no clean match), second call is dumpsys.
+	out := `
+  com.test.app/com.test.app.MainActivity filter
+    Action: "android.intent.action.MAIN"
+    Category: "android.intent.category.LAUNCHER"
+`
+	shell := &fakeMultiShell{
+		outputs: []string{"No activity found", out},
+		errs:    []error{nil, nil},
+		counter: new(int),
+	}
+	driver := New(newTrackingClient(), &core.PlatformInfo{}, shell)
+	got, err := driver.resolveLauncherActivity("com.test.app", 28)
+	if err != nil {
+		t.Fatalf("resolveLauncherActivity fallback: %v", err)
+	}
+	if got != "com.test.app/com.test.app.MainActivity" {
+		t.Errorf("dumpsys fallback returned %q", got)
+	}
+}
+
+func TestResolveLauncherActivity_PreAPI24_GoesStraightToDumpsys(t *testing.T) {
+	out := `
+  com.test.app/com.test.app.MainActivity filter
+    Action: "android.intent.action.MAIN"
+    Category: "android.intent.category.LAUNCHER"
+`
+	shell := &mockShell{out: out}
+	driver := New(newTrackingClient(), &core.PlatformInfo{}, shell)
+	got, err := driver.resolveLauncherActivity("com.test.app", 21)
+	if err != nil {
+		t.Fatalf("resolveLauncherActivity pre-API-24: %v", err)
+	}
+	if got != "com.test.app/com.test.app.MainActivity" {
+		t.Errorf("got %q", got)
+	}
+	// Only the dumpsys call should have happened.
+	if len(shell.commands) != 1 || !strings.Contains(shell.commands[0], "dumpsys") {
+		t.Errorf("expected only dumpsys, got %v", shell.commands)
+	}
+}
+
+func TestResolveLauncherActivityCached(t *testing.T) {
+	shell := &mockShell{out: "com.test.app/com.test.app.MainActivity"}
+	driver := New(newTrackingClient(), &core.PlatformInfo{}, shell)
+
+	// First call resolves via shell.
+	got, err := driver.resolveLauncherActivityCached("com.test.app", 28)
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	first := got
+	if len(shell.commands) != 1 {
+		t.Errorf("expected 1 shell call, got %d", len(shell.commands))
+	}
+
+	// Second call uses cache — no new shell call.
+	got, err = driver.resolveLauncherActivityCached("com.test.app", 28)
+	if err != nil || got != first {
+		t.Errorf("cached call mismatch: %q vs %q (err=%v)", got, first, err)
+	}
+	if len(shell.commands) != 1 {
+		t.Errorf("cached call should not hit shell; got %d total", len(shell.commands))
+	}
+}
+
+// =============================================================================
+// launchAppViaShell — exercises the API-level + activity-resolution branches
+// =============================================================================
+
+func TestLaunchAppViaShell_OldAPI_UsesMonkey(t *testing.T) {
+	// API < 24 + no arguments → goes directly to monkey.
+	// getAPILevel is cached → seed it.
+	driver := New(newTrackingClient(), &core.PlatformInfo{}, &mockShell{out: "Events injected: 1"})
+	driver.cachedAPILevel = 21
+	res := driver.launchAppViaShell("com.test.app", nil)
+	if !res.Success {
+		t.Fatalf("launchAppViaShell pre-API-24: %v", res.Error)
+	}
+}
+
+func TestLaunchAppViaShell_ModernAPI_StartActivity(t *testing.T) {
+	// API >= 26 + activity resolved → use am start-activity, success.
+	calls := 0
+	shell := &fakeMultiShell{
+		// Sequence:
+		// 1. cmd package resolve-activity (API 26+) → returns activity
+		// 2. am start-activity → success (empty output, no "Error")
+		outputs: []string{
+			"com.test.app/com.test.app.MainActivity",
+			"Starting: Intent { ... }",
+		},
+		errs:    []error{nil, nil},
+		counter: &calls,
+	}
+	driver := New(newTrackingClient(), &core.PlatformInfo{}, shell)
+	driver.cachedAPILevel = 30
+	res := driver.launchAppViaShell("com.test.app", nil)
+	if !res.Success {
+		t.Fatalf("launchAppViaShell modern: %v (msg: %s)", res.Error, res.Message)
+	}
+}
+
+func TestLaunchAppViaShell_ActivityResolutionFails_FallsBackToMonkey(t *testing.T) {
+	// Activity resolution returns junk → fallback to monkey.
+	calls := 0
+	shell := &fakeMultiShell{
+		outputs: []string{
+			"No activity found",              // resolve-activity returns garbage
+			"",                                // dumpsys output empty
+			"Events injected: 1",              // monkey succeeds
+		},
+		errs:    []error{nil, nil, nil},
+		counter: &calls,
+	}
+	driver := New(newTrackingClient(), &core.PlatformInfo{}, shell)
+	driver.cachedAPILevel = 30
+	res := driver.launchAppViaShell("com.test.app", nil)
+	if !res.Success {
+		t.Fatalf("launchAppViaShell monkey fallback: %v", res.Error)
+	}
+}
+
+// =============================================================================
+// isBrowserForeground — single shell call + pkg list scan
+// =============================================================================
+
+func TestIsBrowserForeground_NoDevice(t *testing.T) {
+	d := New(newTrackingClient(), &core.PlatformInfo{}, nil)
+	if d.isBrowserForeground() {
+		t.Error("isBrowserForeground without device should be false")
+	}
+}
+
+func TestIsBrowserForeground_ChromePackage(t *testing.T) {
+	// Output mentioning com.android.chrome should resolve to true.
+	d := New(newTrackingClient(), &core.PlatformInfo{}, &mockShell{
+		out: "topResumedActivity=ActivityRecord{u0 com.android.chrome/.MainActivity t123}",
+	})
+	if !d.isBrowserForeground() {
+		t.Error("expected isBrowserForeground=true when chrome in foreground")
+	}
+}
+
+func TestIsBrowserForeground_NonBrowser(t *testing.T) {
+	d := New(newTrackingClient(), &core.PlatformInfo{}, &mockShell{
+		out: "topResumedActivity=ActivityRecord{u0 com.testhiveapp/.MainActivity t123}",
+	})
+	if d.isBrowserForeground() {
+		t.Error("non-browser package should return false")
+	}
+}
+
+func TestIsBrowserForeground_ShellError(t *testing.T) {
+	d := New(newTrackingClient(), &core.PlatformInfo{}, &mockShell{err: errors.New("blocked")})
+	if d.isBrowserForeground() {
+		t.Error("shell error should return false")
+	}
+}
+
+// =============================================================================
+// inputRandom — needs ActiveElement to return a real Element
+// =============================================================================
+
+// makeFocusedElement constructs a uiautomator2.Element with SendKeys and
+// Clear callbacks that record their invocations.
+func makeFocusedElement(text string, sendKeysOut *string, clearCount *int, sendKeysErr error) *uiautomator2.Element {
+	elem := uiautomator2.NewCachedElement("focused", text, uiautomator2.ElementRect{X: 0, Y: 0, Width: 100, Height: 50})
+	elem.SetSendKeysFunc(func(s string) error {
+		if sendKeysOut != nil {
+			*sendKeysOut = s
+		}
+		return sendKeysErr
+	})
+	elem.SetClearFunc(func() error {
+		if clearCount != nil {
+			*clearCount++
+		}
+		return nil
+	})
+	return elem
+}
+
+func TestInputRandom_String(t *testing.T) {
+	var typed string
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementReturn = makeFocusedElement("", &typed, nil, nil)
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.inputRandom(&flow.InputRandomStep{Length: 8})
+	if !res.Success {
+		t.Fatalf("inputRandom default: %v", res.Error)
+	}
+	if len(typed) != 8 {
+		t.Errorf("expected 8 random chars, got %d: %q", len(typed), typed)
+	}
+}
+
+func TestInputRandom_Email(t *testing.T) {
+	var typed string
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementReturn = makeFocusedElement("", &typed, nil, nil)
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.inputRandom(&flow.InputRandomStep{DataType: "EMAIL"})
+	if !res.Success {
+		t.Fatalf("inputRandom email: %v", res.Error)
+	}
+	if !strings.Contains(typed, "@") {
+		t.Errorf("expected email-shaped string, got %q", typed)
+	}
+}
+
+func TestInputRandom_Number(t *testing.T) {
+	var typed string
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementReturn = makeFocusedElement("", &typed, nil, nil)
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.inputRandom(&flow.InputRandomStep{DataType: "NUMBER", Length: 6})
+	if !res.Success {
+		t.Fatalf("inputRandom number: %v", res.Error)
+	}
+	for _, c := range typed {
+		if c < '0' || c > '9' {
+			t.Errorf("expected digits only, got %q", typed)
+			break
+		}
+	}
+}
+
+func TestInputRandom_PersonName(t *testing.T) {
+	var typed string
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementReturn = makeFocusedElement("", &typed, nil, nil)
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.inputRandom(&flow.InputRandomStep{DataType: "PERSON_NAME"})
+	if !res.Success {
+		t.Fatalf("inputRandom person name: %v", res.Error)
+	}
+	if typed == "" {
+		t.Error("expected non-empty name")
+	}
+}
+
+func TestInputRandom_NoFocusedElement(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementErr = errors.New("no focused element")
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+	res := driver.inputRandom(&flow.InputRandomStep{Length: 5})
+	if res.Success {
+		t.Error("inputRandom without focused element should fail")
+	}
+}
+
+// =============================================================================
+// pasteText — GetClipboard + findFocused
+// =============================================================================
+
+func TestPasteText_Success(t *testing.T) {
+	var typed string
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementReturn = makeFocusedElement("", &typed, nil, nil)
+	// richClient is what provides GetClipboard; for paste we need a client
+	// that returns the right clipboard text AND ActiveElement at once.
+	// Use a small composition: pasteText calls GetClipboard via trackingClient.
+	driver := New(&pasteClient{scriptedClient: client, clipboard: "pasted-content"}, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.pasteText(&flow.PasteTextStep{})
+	if !res.Success {
+		t.Fatalf("pasteText: %v", res.Error)
+	}
+	if typed != "pasted-content" {
+		t.Errorf("expected typed text 'pasted-content', got %q", typed)
+	}
+}
+
+// pasteClient overrides GetClipboard.
+type pasteClient struct {
+	*scriptedClient
+	clipboard    string
+	clipboardErr error
+}
+
+func (p *pasteClient) GetClipboard() (string, error) { return p.clipboard, p.clipboardErr }
+
+func TestPasteText_GetClipboardFails(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	driver := New(&pasteClient{scriptedClient: client, clipboardErr: errors.New("nope")}, &core.PlatformInfo{}, &mockShell{})
+	res := driver.pasteText(&flow.PasteTextStep{})
+	if res.Success {
+		t.Error("pasteText with GetClipboard error should fail")
+	}
+}
+
+func TestPasteText_NoFocusedElement(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementErr = errors.New("no focused element")
+	driver := New(&pasteClient{scriptedClient: client, clipboard: "x"}, &core.PlatformInfo{}, &mockShell{})
+	res := driver.pasteText(&flow.PasteTextStep{})
+	if res.Success {
+		t.Error("pasteText without focused element should fail")
+	}
+}
+
+// =============================================================================
+// eraseText — focused-element happy path (covers the Clear branch)
+// =============================================================================
+
+func TestEraseText_ClearsAllWhenCharsGE_TextLen(t *testing.T) {
+	clearCount := 0
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementReturn = makeFocusedElement("Hello", nil, &clearCount, nil)
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.eraseText(&flow.EraseTextStep{Characters: 10}) // > 5 → clears all
+	if !res.Success {
+		t.Fatalf("eraseText: %v", res.Error)
+	}
+	if clearCount != 1 {
+		t.Errorf("expected 1 Clear call, got %d", clearCount)
+	}
+}
+
+func TestEraseText_PartialErase(t *testing.T) {
+	var typed string
+	clearCount := 0
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementReturn = makeFocusedElement("Hello", &typed, &clearCount, nil)
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	// 2 chars off "Hello" → leaves "Hel"
+	res := driver.eraseText(&flow.EraseTextStep{Characters: 2})
+	if !res.Success {
+		t.Fatalf("eraseText partial: %v", res.Error)
+	}
+	if clearCount != 1 {
+		t.Errorf("expected Clear before re-input, got %d", clearCount)
+	}
+	if typed != "Hel" {
+		t.Errorf("expected re-input \"Hel\", got %q", typed)
+	}
+}

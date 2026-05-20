@@ -428,3 +428,143 @@ func TestConsumeInputFlag(t *testing.T) {
 		t.Error("flag should be reset after consume")
 	}
 }
+
+// =============================================================================
+// ParsePageSource — XML parser
+// =============================================================================
+
+func TestParsePageSource_HappyPath(t *testing.T) {
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" enabled="true" clickable="false" scrollable="false">
+    <node class="android.widget.Button" text="Sign In" resource-id="com.app:id/btn" bounds="[100,200][300,260]" enabled="true" clickable="true" displayed="true"/>
+    <node class="android.widget.ScrollView" bounds="[0,300][1080,2200]" scrollable="true" enabled="true"/>
+  </node>
+</hierarchy>`
+	elems, err := ParsePageSource(xml)
+	if err != nil {
+		t.Fatalf("ParsePageSource: %v", err)
+	}
+	if len(elems) == 0 {
+		t.Fatal("expected at least one element")
+	}
+
+	// Find the button
+	var btn *ParsedElement
+	for _, e := range elems {
+		if e.Text == "Sign In" {
+			btn = e
+			break
+		}
+	}
+	if btn == nil {
+		t.Fatal("missing Sign In button")
+	}
+	if !btn.Clickable {
+		t.Error("button should be clickable")
+	}
+	if btn.ResourceID != "com.app:id/btn" {
+		t.Errorf("resource-id: got %q", btn.ResourceID)
+	}
+	if btn.Bounds.Width != 200 || btn.Bounds.Height != 60 {
+		t.Errorf("bounds: got %+v, want 200x60", btn.Bounds)
+	}
+}
+
+func TestParsePageSource_UIAutomatorFormat(t *testing.T) {
+	// Old UIAutomator dump format uses class names as element tags.
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy>
+  <android.widget.FrameLayout bounds="[0,0][1080,2400]">
+    <android.widget.TextView text="hello" bounds="[10,10][100,40]"/>
+  </android.widget.FrameLayout>
+</hierarchy>`
+	elems, err := ParsePageSource(xml)
+	if err != nil {
+		t.Fatalf("ParsePageSource UIAutomator format: %v", err)
+	}
+	if len(elems) == 0 {
+		t.Fatal("expected at least one element")
+	}
+}
+
+func TestParsePageSource_InvalidXML(t *testing.T) {
+	_, err := ParsePageSource("<not closed")
+	if err == nil {
+		t.Error("expected error for invalid XML")
+	}
+}
+
+func TestParsePageSource_Empty(t *testing.T) {
+	_, err := ParsePageSource("")
+	if err == nil {
+		t.Error("expected error for empty input")
+	}
+}
+
+// =============================================================================
+// FilterScrollable / FindLargestScrollable
+// =============================================================================
+
+func TestFilterScrollable(t *testing.T) {
+	elems := []*ParsedElement{
+		{Scrollable: true, Bounds: core.Bounds{Width: 100, Height: 100}},
+		{Scrollable: false, Bounds: core.Bounds{Width: 100, Height: 100}},
+		{Scrollable: true, Bounds: core.Bounds{Width: 0, Height: 100}}, // zero width → skip
+		{Scrollable: true, Bounds: core.Bounds{Width: 100, Height: 0}}, // zero height → skip
+	}
+	got := FilterScrollable(elems)
+	if len(got) != 1 {
+		t.Errorf("expected 1 scrollable element, got %d", len(got))
+	}
+}
+
+func TestFindLargestScrollable(t *testing.T) {
+	// No scrollables
+	got := FindLargestScrollable([]*ParsedElement{
+		{Scrollable: false, Bounds: core.Bounds{Width: 100, Height: 100}},
+	})
+	if got != nil {
+		t.Error("expected nil when no scrollables present")
+	}
+
+	// Largest of multiple
+	a := &ParsedElement{Scrollable: true, Bounds: core.Bounds{Width: 100, Height: 100}} // 10000
+	b := &ParsedElement{Scrollable: true, Bounds: core.Bounds{Width: 200, Height: 200}} // 40000
+	c := &ParsedElement{Scrollable: true, Bounds: core.Bounds{Width: 50, Height: 50}}   // 2500
+	got = FindLargestScrollable([]*ParsedElement{a, b, c})
+	if got != b {
+		t.Errorf("expected largest=b (200x200), got %+v", got)
+	}
+}
+
+// =============================================================================
+// GetClickableElement
+// =============================================================================
+
+func TestGetClickableElement(t *testing.T) {
+	// Nil → nil
+	if e := GetClickableElement(nil); e != nil {
+		t.Error("GetClickableElement(nil) should return nil")
+	}
+
+	// Self is clickable → return self
+	self := &ParsedElement{Clickable: true}
+	if e := GetClickableElement(self); e != self {
+		t.Error("self-clickable should return itself")
+	}
+
+	// Walk up to find clickable parent
+	grandparent := &ParsedElement{Clickable: true}
+	parent := &ParsedElement{Clickable: false, Parent: grandparent}
+	child := &ParsedElement{Clickable: false, Parent: parent}
+	if e := GetClickableElement(child); e != grandparent {
+		t.Errorf("expected grandparent, got %+v", e)
+	}
+
+	// No clickable ancestor — return original
+	deadend := &ParsedElement{Clickable: false}
+	if e := GetClickableElement(deadend); e != deadend {
+		t.Error("no clickable parent → return original")
+	}
+}
