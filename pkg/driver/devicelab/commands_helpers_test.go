@@ -10,6 +10,7 @@ import (
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
+	"github.com/devicelab-dev/maestro-runner/pkg/uiautomator2"
 )
 
 // mockShell is a minimal ShellExecutor that records commands.
@@ -1744,5 +1745,859 @@ func TestDriver_WaitForSettle(t *testing.T) {
 	client.settleErr = errors.New("nope")
 	if _, err := d.WaitForSettle(1000, 500); err == nil {
 		t.Error("WaitForSettle should propagate client error")
+	}
+}
+
+// =============================================================================
+// scriptedClient — extends trackingClient with scriptable FindElement,
+// FindAndClick, ActiveElement, PressKeyCode tracking, SendKeyActions
+// tracking. Lets element-finding command paths execute end-to-end without
+// real device I/O. d.webView stays nil so the CDP branches no-op.
+// =============================================================================
+
+type scriptedClient struct {
+	*trackingClient
+	// findElementReturn is returned for any FindElement call.
+	findElementReturn *uiautomator2.Element
+	findElementErr    error
+	findElementCalls  int
+
+	// findAndClickReturn is returned for any FindAndClick call.
+	findAndClickReturn *uiautomator2.Element
+	findAndClickErr    error
+	findAndClickCalls  int
+
+	activeElementReturn *uiautomator2.Element
+	activeElementErr    error
+
+	sendKeyActionsCalls   []string
+	sendKeyActionsErr     error
+}
+
+func (s *scriptedClient) FindElement(strategy, selector string) (*uiautomator2.Element, error) {
+	s.findElementCalls++
+	return s.findElementReturn, s.findElementErr
+}
+func (s *scriptedClient) FindAndClick(strategy, selector string) (*uiautomator2.Element, error) {
+	s.findAndClickCalls++
+	return s.findAndClickReturn, s.findAndClickErr
+}
+func (s *scriptedClient) ActiveElement() (*uiautomator2.Element, error) {
+	return s.activeElementReturn, s.activeElementErr
+}
+func (s *scriptedClient) SendKeyActions(text string) error {
+	s.sendKeyActionsCalls = append(s.sendKeyActionsCalls, text)
+	return s.sendKeyActionsErr
+}
+
+// helper: build a cached Element with text + bounds + action callbacks.
+func makeCachedElement(text string, rect uiautomator2.ElementRect, sendKeys func(string) error) *uiautomator2.Element {
+	elem := uiautomator2.NewCachedElement("elem-id", text, rect)
+	if sendKeys != nil {
+		elem.SetSendKeysFunc(sendKeys)
+	}
+	return elem
+}
+
+// =============================================================================
+// tapOn (text selector) — uses FindAndClick path
+// =============================================================================
+
+func TestTapOn_TextSelector_Success(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findAndClickReturn = uiautomator2.NewCachedElement(
+		"elem", "Sign In", uiautomator2.ElementRect{X: 10, Y: 20, Width: 100, Height: 50},
+	)
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+
+	res := driver.tapOn(&flow.TapOnStep{Selector: flow.Selector{Text: "Sign In"}})
+	if !res.Success {
+		t.Fatalf("tapOn text selector: %v", res.Error)
+	}
+	if client.findAndClickCalls < 1 {
+		t.Errorf("expected at least 1 FindAndClick call, got %d", client.findAndClickCalls)
+	}
+}
+
+func TestTapOn_TextSelector_NotFound(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findAndClickErr = errors.New("not found")
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	step := &flow.TapOnStep{
+		Selector: flow.Selector{Text: "Missing"},
+		BaseStep: flow.BaseStep{TimeoutMs: 100},
+	}
+	res := driver.tapOn(step)
+	if res.Success {
+		t.Error("tapOn for missing text selector should fail")
+	}
+}
+
+// =============================================================================
+// tapOnPoint via tapOn (selector empty + point set)
+// =============================================================================
+
+func TestTapOn_PointOnly_DelegatesToTapOnPointWithCoords(t *testing.T) {
+	client := &clickLongClickClient{trackingClient: newTrackingClient()}
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1000, ScreenHeight: 2000}, &mockShell{})
+
+	res := driver.tapOn(&flow.TapOnStep{Point: "50%,50%"})
+	if !res.Success {
+		t.Fatalf("tapOn with Point should succeed: %v", res.Error)
+	}
+	if len(client.clicks) != 1 || client.clicks[0] != [2]int{500, 1000} {
+		t.Errorf("expected click at (500, 1000), got %v", client.clicks)
+	}
+}
+
+// =============================================================================
+// doubleTapOn — ID selector hits findElementForTap → findElement → tryFindElement
+// =============================================================================
+
+// scriptedClickClient: scripted FindElement + Click/DoubleClick/LongClick.
+type scriptedClickClient struct {
+	*scriptedClient
+	clicks       [][2]int
+	doubleClicks [][2]int
+	longClicks   []longClickArgs
+	clickErr     error
+}
+
+func (s *scriptedClickClient) Click(x, y int) error {
+	s.clicks = append(s.clicks, [2]int{x, y})
+	return s.clickErr
+}
+func (s *scriptedClickClient) DoubleClick(x, y int) error {
+	s.doubleClicks = append(s.doubleClicks, [2]int{x, y})
+	return s.clickErr
+}
+func (s *scriptedClickClient) LongClick(x, y, duration int) error {
+	s.longClicks = append(s.longClicks, longClickArgs{x, y, duration})
+	return s.clickErr
+}
+
+func TestDoubleTapOn_Success(t *testing.T) {
+	client := &scriptedClickClient{scriptedClient: &scriptedClient{trackingClient: newTrackingClient()}}
+	client.findElementReturn = uiautomator2.NewCachedElement(
+		"id", "btn", uiautomator2.ElementRect{X: 100, Y: 200, Width: 80, Height: 40},
+	)
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+
+	res := driver.doubleTapOn(&flow.DoubleTapOnStep{Selector: flow.Selector{ID: "btn"}})
+	if !res.Success {
+		t.Fatalf("doubleTapOn: %v", res.Error)
+	}
+	if len(client.doubleClicks) != 1 {
+		t.Fatalf("expected 1 DoubleClick, got %d", len(client.doubleClicks))
+	}
+	// Center of (100, 200, 80, 40) = (140, 220)
+	if client.doubleClicks[0] != [2]int{140, 220} {
+		t.Errorf("expected click at (140, 220), got %v", client.doubleClicks[0])
+	}
+}
+
+func TestDoubleTapOn_NotFound(t *testing.T) {
+	client := &scriptedClickClient{scriptedClient: &scriptedClient{trackingClient: newTrackingClient()}}
+	client.findElementErr = errors.New("not found")
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+	step := &flow.DoubleTapOnStep{
+		Selector: flow.Selector{ID: "missing"},
+		BaseStep: flow.BaseStep{TimeoutMs: 100},
+	}
+	if res := driver.doubleTapOn(step); res.Success {
+		t.Error("doubleTapOn for missing element should fail")
+	}
+}
+
+// =============================================================================
+// longPressOn — ID selector + default and custom duration
+// =============================================================================
+
+func TestLongPressOn_DefaultDuration(t *testing.T) {
+	client := &scriptedClickClient{scriptedClient: &scriptedClient{trackingClient: newTrackingClient()}}
+	client.findElementReturn = uiautomator2.NewCachedElement(
+		"id", "btn", uiautomator2.ElementRect{X: 0, Y: 0, Width: 100, Height: 100},
+	)
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+
+	res := driver.longPressOn(&flow.LongPressOnStep{Selector: flow.Selector{ID: "btn"}})
+	if !res.Success {
+		t.Fatalf("longPressOn: %v", res.Error)
+	}
+	if len(client.longClicks) != 1 {
+		t.Fatalf("expected 1 LongClick, got %d", len(client.longClicks))
+	}
+	// Default duration = 1000 ms
+	if client.longClicks[0].Duration != 1000 {
+		t.Errorf("default duration: got %d, want 1000", client.longClicks[0].Duration)
+	}
+}
+
+func TestLongPressOn_CustomDuration(t *testing.T) {
+	client := &scriptedClickClient{scriptedClient: &scriptedClient{trackingClient: newTrackingClient()}}
+	client.findElementReturn = uiautomator2.NewCachedElement(
+		"id", "btn", uiautomator2.ElementRect{X: 0, Y: 0, Width: 100, Height: 100},
+	)
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	driver.longPressOn(&flow.LongPressOnStep{
+		Selector:   flow.Selector{ID: "btn"},
+		DurationMs: 2500,
+	})
+	if client.longClicks[0].Duration != 2500 {
+		t.Errorf("custom duration: got %d, want 2500", client.longClicks[0].Duration)
+	}
+}
+
+// =============================================================================
+// assertVisible — uses findElementFast which calls FindElement
+// =============================================================================
+
+func TestAssertVisible_Success(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findElementReturn = uiautomator2.NewCachedElement(
+		"id", "Hello", uiautomator2.ElementRect{X: 0, Y: 0, Width: 10, Height: 10},
+	)
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.assertVisible(&flow.AssertVisibleStep{Selector: flow.Selector{ID: "el"}})
+	if !res.Success {
+		t.Fatalf("assertVisible: %v", res.Error)
+	}
+}
+
+func TestAssertVisible_NotFound(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findElementErr = errors.New("not found")
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+	step := &flow.AssertVisibleStep{
+		Selector: flow.Selector{ID: "missing"},
+		BaseStep: flow.BaseStep{TimeoutMs: 100},
+	}
+	if res := driver.assertVisible(step); res.Success {
+		t.Error("assertVisible for missing element should fail")
+	}
+}
+
+// =============================================================================
+// inputText — no-selector path uses SendKeyActions directly
+// =============================================================================
+
+func TestInputText_NoSelector_SendsKeyActions(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.inputText(&flow.InputTextStep{Text: "hello"})
+	if !res.Success {
+		t.Fatalf("inputText no-selector: %v", res.Error)
+	}
+	if len(client.sendKeyActionsCalls) != 1 || client.sendKeyActionsCalls[0] != "hello" {
+		t.Errorf("expected SendKeyActions(\"hello\"), got %v", client.sendKeyActionsCalls)
+	}
+}
+
+func TestInputText_KeyPress(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.inputText(&flow.InputTextStep{Text: "abc", KeyPress: true})
+	if !res.Success {
+		t.Fatalf("inputText keyPress: %v", res.Error)
+	}
+	if len(client.sendKeyActionsCalls) != 1 || client.sendKeyActionsCalls[0] != "abc" {
+		t.Errorf("expected SendKeyActions(\"abc\"), got %v", client.sendKeyActionsCalls)
+	}
+}
+
+func TestInputText_EmptyText(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+	if res := driver.inputText(&flow.InputTextStep{Text: ""}); res.Success {
+		t.Error("inputText with empty text should fail")
+	}
+}
+
+func TestInputText_WithSelector_UsesElementSendKeys(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	sendKeysCallText := ""
+	elem := uiautomator2.NewCachedElement("id", "", uiautomator2.ElementRect{X: 0, Y: 0, Width: 100, Height: 50})
+	elem.SetSendKeysFunc(func(text string) error {
+		sendKeysCallText = text
+		return nil
+	})
+	client.findElementReturn = elem
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.inputText(&flow.InputTextStep{
+		Selector: flow.Selector{ID: "input"},
+		Text:     "hello",
+	})
+	if !res.Success {
+		t.Fatalf("inputText with selector: %v", res.Error)
+	}
+	if sendKeysCallText != "hello" {
+		t.Errorf("SendKeysFunc received %q, want %q", sendKeysCallText, "hello")
+	}
+}
+
+// =============================================================================
+// eraseText — focused element absent → falls through to PressKeyCode loop
+// =============================================================================
+
+func TestEraseText_FallsThroughToPressKeyCodeLoop(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	// ActiveElement errors → findFocused returns no element → fallback path.
+	client.activeElementErr = errors.New("no focused element")
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.eraseText(&flow.EraseTextStep{Characters: 5})
+	if !res.Success {
+		t.Fatalf("eraseText fallback: %v", res.Error)
+	}
+	// 5 backspace presses via PressKeyCode.
+	if len(client.pressKeyCodes) != 5 {
+		t.Errorf("expected 5 PressKeyCode calls, got %d", len(client.pressKeyCodes))
+	}
+}
+
+func TestEraseText_DefaultCharacters(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementErr = errors.New("no focused element")
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	// Characters <= 0 should default to 50.
+	driver.eraseText(&flow.EraseTextStep{Characters: 0})
+	if len(client.pressKeyCodes) != 50 {
+		t.Errorf("default Characters=50, got %d PressKeyCode calls", len(client.pressKeyCodes))
+	}
+}
+
+// =============================================================================
+// assertNotVisible
+// =============================================================================
+
+func TestAssertNotVisible_ElementMissing(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findElementErr = errors.New("not found")
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+	res := driver.assertNotVisible(&flow.AssertNotVisibleStep{
+		Selector: flow.Selector{ID: "missing"},
+		BaseStep: flow.BaseStep{TimeoutMs: 100},
+	})
+	if !res.Success {
+		t.Fatalf("assertNotVisible should succeed when element missing: %v", res.Error)
+	}
+}
+
+func TestAssertNotVisible_ElementStillPresent(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findElementReturn = uiautomator2.NewCachedElement(
+		"id", "Hello", uiautomator2.ElementRect{X: 0, Y: 0, Width: 10, Height: 10},
+	)
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	// Element is "still visible" → expect failure after short polling timeout.
+	res := driver.assertNotVisible(&flow.AssertNotVisibleStep{
+		Selector: flow.Selector{ID: "el"},
+		BaseStep: flow.BaseStep{TimeoutMs: 200},
+	})
+	if res.Success {
+		t.Error("assertNotVisible should fail when element keeps being found")
+	}
+}
+
+// =============================================================================
+// Execute dispatcher — touches a slice of step types in one test
+// =============================================================================
+
+func TestExecute_DispatchesByStepType(t *testing.T) {
+	client := &clickLongClickClient{trackingClient: newTrackingClient()}
+	shell := &mockShell{}
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1000, ScreenHeight: 2000}, shell)
+
+	cases := []struct {
+		name string
+		step flow.Step
+		want bool // expected Success
+	}{
+		// Success paths
+		{"BackStep", &flow.BackStep{}, true},
+		{"PressKeyStep enter", &flow.PressKeyStep{Key: "enter"}, true},
+		{"OpenNotificationsStep", &flow.OpenNotificationsStep{}, true},
+		{"SetClipboardStep", &flow.SetClipboardStep{Text: "x"}, true},
+		{"SetOrientationStep", &flow.SetOrientationStep{Orientation: "PORTRAIT"}, true},
+		{"TakeScreenshotStep", &flow.TakeScreenshotStep{}, true},
+		{"TapOnPointStep XY", &flow.TapOnPointStep{X: 10, Y: 20}, true},
+		{"SwipeStep direction", &flow.SwipeStep{Direction: "up", Duration: 100}, true},
+		{"HideKeyboardStep", &flow.HideKeyboardStep{}, true},
+		// Expected failures (validation / shell errors)
+		{"InputTextStep empty", &flow.InputTextStep{Text: ""}, false},
+		{"PressKeyStep unknown", &flow.PressKeyStep{Key: "asdf"}, false},
+		{"OpenLinkStep empty", &flow.OpenLinkStep{Link: ""}, false},
+		{"OpenBrowserStep empty", &flow.OpenBrowserStep{URL: ""}, false},
+		{"AddMediaStep empty", &flow.AddMediaStep{}, false},
+		{"SetLocationStep missing lat", &flow.SetLocationStep{Latitude: "", Longitude: "5"}, false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := driver.Execute(c.step)
+			if res == nil {
+				t.Fatal("Execute returned nil")
+			}
+			if res.Success != c.want {
+				t.Errorf("%s: Success=%v, want %v (msg=%q)", c.name, res.Success, c.want, res.Message)
+			}
+			if res.Duration <= 0 && res.Success {
+				t.Errorf("%s: success result should have non-zero duration", c.name)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// scroll (top-level) — no selector → delegates to performScroll which uses ADB
+// =============================================================================
+
+func TestScroll_NoSelector_UsesADB(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	shell := &mockShell{}
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1000, ScreenHeight: 2000}, shell)
+
+	res := driver.scroll(&flow.ScrollStep{Direction: "down"})
+	if !res.Success {
+		t.Fatalf("scroll: %v", res.Error)
+	}
+	if len(shell.commands) != 1 || !strings.Contains(shell.commands[0], "input swipe") {
+		t.Errorf("expected adb input swipe, got %v", shell.commands)
+	}
+}
+
+func TestScroll_NoScreenSize(t *testing.T) {
+	driver := New(newTrackingClient(), &core.PlatformInfo{}, &mockShell{})
+	res := driver.scroll(&flow.ScrollStep{Direction: "down"})
+	if res.Success {
+		t.Error("scroll without screen size should fail")
+	}
+}
+
+// =============================================================================
+// appLifecycleClient — extends scriptedClient with LaunchApp/ForceStop/
+// ClearAppData/GrantPermissions tracking. Used for launchApp tests.
+// =============================================================================
+
+type appLifecycleClient struct {
+	*scriptedClient
+	launches             []string
+	forceStops           []string
+	clearAppDatas        []string
+	grantPermsCalls      int
+	launchAppErr         error
+	forceStopErr         error
+	clearAppDataErr      error
+	grantPermissionsErr  error
+}
+
+func (a *appLifecycleClient) LaunchApp(id string, args map[string]interface{}) error {
+	a.launches = append(a.launches, id)
+	return a.launchAppErr
+}
+func (a *appLifecycleClient) ForceStop(id string) error {
+	a.forceStops = append(a.forceStops, id)
+	return a.forceStopErr
+}
+func (a *appLifecycleClient) ClearAppData(id string) error {
+	a.clearAppDatas = append(a.clearAppDatas, id)
+	return a.clearAppDataErr
+}
+func (a *appLifecycleClient) GrantPermissions(id string, perms []string) error {
+	a.grantPermsCalls++
+	return a.grantPermissionsErr
+}
+
+// =============================================================================
+// launchApp
+// =============================================================================
+
+func TestLaunchApp_HappyPath_NoClearState(t *testing.T) {
+	client := &appLifecycleClient{scriptedClient: &scriptedClient{trackingClient: newTrackingClient()}}
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.launchApp(&flow.LaunchAppStep{AppID: "com.test.app"})
+	if !res.Success {
+		t.Fatalf("launchApp: %v", res.Error)
+	}
+	// Default behavior: force-stop first (StopApp defaults to true), then LaunchApp.
+	if len(client.forceStops) != 1 || client.forceStops[0] != "com.test.app" {
+		t.Errorf("expected ForceStop com.test.app, got %v", client.forceStops)
+	}
+	if len(client.launches) != 1 || client.launches[0] != "com.test.app" {
+		t.Errorf("expected LaunchApp com.test.app, got %v", client.launches)
+	}
+}
+
+func TestLaunchApp_ClearState_UsesClearAppDataRPC(t *testing.T) {
+	client := &appLifecycleClient{scriptedClient: &scriptedClient{trackingClient: newTrackingClient()}}
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.launchApp(&flow.LaunchAppStep{AppID: "com.test.app", ClearState: true})
+	if !res.Success {
+		t.Fatalf("launchApp: %v", res.Error)
+	}
+	if len(client.clearAppDatas) != 1 || client.clearAppDatas[0] != "com.test.app" {
+		t.Errorf("expected ClearAppData com.test.app, got %v", client.clearAppDatas)
+	}
+	// clearState path should NOT also force-stop (the else-if).
+	if len(client.forceStops) != 0 {
+		t.Errorf("expected no ForceStop when clearState=true, got %v", client.forceStops)
+	}
+}
+
+func TestLaunchApp_ClearState_FallsBackToShell(t *testing.T) {
+	client := &appLifecycleClient{scriptedClient: &scriptedClient{trackingClient: newTrackingClient()}}
+	client.clearAppDataErr = errors.New("rpc failed")
+	shell := &mockShell{}
+	driver := New(client, &core.PlatformInfo{}, shell)
+
+	res := driver.launchApp(&flow.LaunchAppStep{AppID: "com.test.app", ClearState: true})
+	if !res.Success {
+		t.Fatalf("launchApp should still succeed via shell fallback: %v", res.Error)
+	}
+	if len(shell.commands) == 0 || !strings.Contains(shell.commands[0], "pm clear com.test.app") {
+		t.Errorf("expected pm clear fallback in shell, got %v", shell.commands)
+	}
+}
+
+func TestLaunchApp_NoAppID(t *testing.T) {
+	driver := New(&appLifecycleClient{scriptedClient: &scriptedClient{trackingClient: newTrackingClient()}}, &core.PlatformInfo{}, &mockShell{})
+	res := driver.launchApp(&flow.LaunchAppStep{})
+	if res.Success {
+		t.Error("launchApp with empty appID should fail")
+	}
+}
+
+func TestLaunchApp_NoDevice(t *testing.T) {
+	driver := New(&appLifecycleClient{scriptedClient: &scriptedClient{trackingClient: newTrackingClient()}}, &core.PlatformInfo{}, nil)
+	res := driver.launchApp(&flow.LaunchAppStep{AppID: "com.test.app"})
+	if res.Success {
+		t.Error("launchApp without device should fail")
+	}
+}
+
+func TestLaunchApp_WithPermissions(t *testing.T) {
+	client := &appLifecycleClient{scriptedClient: &scriptedClient{trackingClient: newTrackingClient()}}
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.launchApp(&flow.LaunchAppStep{
+		AppID:       "com.test.app",
+		Permissions: map[string]string{"camera": "allow"},
+	})
+	if !res.Success {
+		t.Fatalf("launchApp with permissions: %v", res.Error)
+	}
+	if client.grantPermsCalls == 0 {
+		t.Error("GrantPermissions should be called when permissions are configured")
+	}
+}
+
+// =============================================================================
+// copyTextFrom — depends on findElement
+// =============================================================================
+
+func TestCopyTextFrom_Success(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findElementReturn = uiautomator2.NewCachedElement(
+		"id", "Hello World", uiautomator2.ElementRect{X: 0, Y: 0, Width: 100, Height: 50},
+	)
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.copyTextFrom(&flow.CopyTextFromStep{Selector: flow.Selector{ID: "el"}})
+	if !res.Success {
+		t.Fatalf("copyTextFrom: %v", res.Error)
+	}
+	// Clipboard should have been set.
+	if client.clipboardText != "Hello World" {
+		t.Errorf("clipboard text: got %q, want %q", client.clipboardText, "Hello World")
+	}
+	if text, ok := res.Data.(string); !ok || text != "Hello World" {
+		t.Errorf("result Data: got %v, want \"Hello World\"", res.Data)
+	}
+}
+
+func TestCopyTextFrom_NotFound(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findElementErr = errors.New("not found")
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+	res := driver.copyTextFrom(&flow.CopyTextFromStep{
+		Selector: flow.Selector{ID: "x"},
+		BaseStep: flow.BaseStep{TimeoutMs: 100},
+	})
+	if res.Success {
+		t.Error("copyTextFrom for missing element should fail")
+	}
+}
+
+// =============================================================================
+// waitUntil — visible + notVisible
+// =============================================================================
+
+func TestWaitUntil_Visible_Success(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findElementReturn = uiautomator2.NewCachedElement(
+		"id", "Hello", uiautomator2.ElementRect{X: 0, Y: 0, Width: 10, Height: 10},
+	)
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	sel := flow.Selector{ID: "el"}
+	res := driver.waitUntil(&flow.WaitUntilStep{
+		Visible:  &sel,
+		BaseStep: flow.BaseStep{TimeoutMs: 1000},
+	})
+	if !res.Success {
+		t.Fatalf("waitUntil visible: %v", res.Error)
+	}
+}
+
+func TestWaitUntil_NotVisible_Success(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findElementErr = errors.New("not found")
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	sel := flow.Selector{ID: "el"}
+	res := driver.waitUntil(&flow.WaitUntilStep{
+		NotVisible: &sel,
+		BaseStep:   flow.BaseStep{TimeoutMs: 1000},
+	})
+	if !res.Success {
+		t.Fatalf("waitUntil notVisible: %v", res.Error)
+	}
+}
+
+func TestWaitUntil_Visible_Timeout(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findElementErr = errors.New("not found")
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	sel := flow.Selector{ID: "el"}
+	res := driver.waitUntil(&flow.WaitUntilStep{
+		Visible:  &sel,
+		BaseStep: flow.BaseStep{TimeoutMs: 100},
+	})
+	if res.Success {
+		t.Error("waitUntil should time out when element never appears")
+	}
+}
+
+// =============================================================================
+// travel
+// =============================================================================
+
+func TestTravel_HappyPath(t *testing.T) {
+	shell := &mockShell{}
+	driver := New(newTrackingClient(), &core.PlatformInfo{}, shell)
+
+	res := driver.travel(&flow.TravelStep{
+		Points: []string{"37.7,-122.4", "37.8,-122.5"},
+		Speed:  100000, // very fast → ~0s sleep between points
+	})
+	if !res.Success {
+		t.Fatalf("travel: %v", res.Error)
+	}
+	if len(shell.commands) != 2 {
+		t.Errorf("expected 2 MOCK_LOCATION broadcasts, got %d", len(shell.commands))
+	}
+	for _, c := range shell.commands {
+		if !strings.Contains(c, "MOCK_LOCATION") {
+			t.Errorf("expected MOCK_LOCATION command, got %s", c)
+		}
+	}
+}
+
+func TestTravel_NoDevice(t *testing.T) {
+	res := New(newTrackingClient(), &core.PlatformInfo{}, nil).travel(&flow.TravelStep{
+		Points: []string{"0,0", "1,1"},
+	})
+	if res.Success {
+		t.Error("travel without device should fail")
+	}
+}
+
+func TestTravel_OnePointInsufficient(t *testing.T) {
+	driver := New(newTrackingClient(), &core.PlatformInfo{}, &mockShell{})
+	res := driver.travel(&flow.TravelStep{Points: []string{"0,0"}})
+	if res.Success {
+		t.Error("travel with <2 points should fail")
+	}
+}
+
+func TestTravel_ShellError(t *testing.T) {
+	driver := New(newTrackingClient(), &core.PlatformInfo{}, &mockShell{err: errors.New("blocked")})
+	res := driver.travel(&flow.TravelStep{
+		Points: []string{"0,0", "1,1"},
+		Speed:  100000,
+	})
+	if res.Success {
+		t.Error("travel should propagate shell error")
+	}
+}
+
+// =============================================================================
+// getRelativeFilter / applyRelativeFilter
+// =============================================================================
+
+func TestGetRelativeFilter(t *testing.T) {
+	anchor := &flow.Selector{Text: "anchor"}
+	cases := []struct {
+		name string
+		sel  flow.Selector
+		want relativeFilterType
+	}{
+		{"below", flow.Selector{Below: anchor}, filterBelow},
+		{"above", flow.Selector{Above: anchor}, filterAbove},
+		{"leftOf", flow.Selector{LeftOf: anchor}, filterLeftOf},
+		{"rightOf", flow.Selector{RightOf: anchor}, filterRightOf},
+		{"childOf", flow.Selector{ChildOf: anchor}, filterChildOf},
+		{"containsChild", flow.Selector{ContainsChild: anchor}, filterContainsChild},
+		{"insideOf", flow.Selector{InsideOf: anchor}, filterInsideOf},
+		{"none", flow.Selector{}, filterNone},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ft := getRelativeFilter(c.sel)
+			if ft != c.want {
+				t.Errorf("filter type: got %v, want %v", ft, c.want)
+			}
+			if c.want == filterNone {
+				if got != nil {
+					t.Errorf("expected nil selector for none, got %+v", got)
+				}
+			} else if got == nil {
+				t.Errorf("expected non-nil anchor selector for %s", c.name)
+			}
+		})
+	}
+}
+
+func TestApplyRelativeFilter(t *testing.T) {
+	anchor := makeElement(0, 100, 50, 50, 0)
+	below := makeElement(0, 200, 10, 10, 0)
+	above := makeElement(0, 50, 10, 10, 0)
+	elems := []*ParsedElement{below, above}
+
+	cases := []struct {
+		ft     relativeFilterType
+		expect int
+	}{
+		{filterBelow, 1},         // only "below"
+		{filterAbove, 1},         // only "above"
+		{filterLeftOf, 0},        // none have a smaller right edge than anchor.left=0
+		{filterRightOf, 0},
+		{filterChildOf, 0},
+		{filterContainsChild, 0},
+		{filterInsideOf, 0},
+		{filterNone, 2},          // default returns input unchanged
+	}
+	for _, c := range cases {
+		got := applyRelativeFilter(elems, anchor, c.ft)
+		if len(got) != c.expect {
+			t.Errorf("filter %v: got %d results, want %d", c.ft, len(got), c.expect)
+		}
+	}
+}
+
+// =============================================================================
+// escapeUIAutomator — pure string escape
+// =============================================================================
+
+func TestEscapeUIAutomator(t *testing.T) {
+	cases := map[string]string{
+		"":             "",
+		"plain":        "plain",
+		`with "quote"`: `with \"quote\"`,
+		"new\nline":    `new\nline`,
+		"car\rriage":   `car\rriage`,
+		"tab\there":    `tab\there`,
+		`back\slash`:   `back\\slash`,
+		"dot.star*":    `dot\.star\*`,
+		"$dollar":      `\$dollar`,
+		"(parens)":     `\(parens\)`,
+		"[bracket]":    `\[bracket\]`,
+		"{brace}":      `\{brace\}`,
+		"a|b":          `a\|b`,
+		"a^b":          `a\^b`,
+		"a+b?":         `a\+b\?`,
+	}
+	for in, want := range cases {
+		if got := escapeUIAutomator(in); got != want {
+			t.Errorf("escapeUIAutomator(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// =============================================================================
+// successResult / errorResult — tiny wrappers
+// =============================================================================
+
+func TestSuccessAndErrorResult(t *testing.T) {
+	info := &core.ElementInfo{ID: "x"}
+	s := successResult("ok", info)
+	if !s.Success || s.Message != "ok" || s.Element != info {
+		t.Errorf("successResult: %+v", s)
+	}
+
+	err := errors.New("boom")
+	e := errorResult(err, "oops")
+	if e.Success || e.Message != "oops" || e.Error != err {
+		t.Errorf("errorResult: %+v", e)
+	}
+}
+
+// =============================================================================
+// buildSelectors / buildSelectorsForTap / buildClickableOnlyStrategies
+// =============================================================================
+
+func TestBuildSelectors_Smoke(t *testing.T) {
+	// Just ensure these return at least one strategy for text/id selectors
+	// without blowing up. The exact UiSelector strings are an implementation
+	// detail. Size-only selectors are handled by the page-source path, not
+	// UiAutomator, so they legitimately produce zero strategies — excluded.
+	cases := []flow.Selector{
+		{Text: "Hello"},
+		{ID: "com.app:id/btn"},
+		{Text: ".*regex.*"},
+	}
+	for _, sel := range cases {
+		strategies, err := buildSelectors(sel, 0)
+		if err != nil {
+			t.Errorf("buildSelectors(%+v): %v", sel, err)
+		}
+		if len(strategies) == 0 {
+			t.Errorf("buildSelectors(%+v): got 0 strategies", sel)
+		}
+		strategiesTap, err := buildSelectorsForTap(sel, 0)
+		if err != nil {
+			t.Errorf("buildSelectorsForTap(%+v): %v", sel, err)
+		}
+		if len(strategiesTap) == 0 {
+			t.Errorf("buildSelectorsForTap(%+v): got 0 strategies", sel)
+		}
+	}
+}
+
+func TestBuildClickableOnlyStrategies(t *testing.T) {
+	sel := flow.Selector{Text: "Sign In"}
+	strategies, err := buildClickableOnlyStrategies(sel)
+	if err != nil {
+		t.Fatalf("buildClickableOnlyStrategies: %v", err)
+	}
+	if len(strategies) == 0 {
+		t.Error("expected at least one clickable strategy for text selector")
+	}
+	// Every strategy should mention "clickable" in its UiSelector value.
+	for _, s := range strategies {
+		if !strings.Contains(s.Value, "clickable") {
+			t.Errorf("clickable-only strategy missing 'clickable' filter: %s", s.Value)
+		}
 	}
 }
