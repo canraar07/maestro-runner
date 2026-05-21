@@ -246,6 +246,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 	// Device control
 	case *flow.SetOrientationStep:
 		result = d.setOrientation(s)
+	case *flow.SetLocationStep:
+		result = d.setLocation(s)
 	case *flow.OpenLinkStep:
 		result = d.openLink(s)
 	case *flow.OpenBrowserStep:

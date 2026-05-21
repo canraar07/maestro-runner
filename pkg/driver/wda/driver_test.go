@@ -733,6 +733,28 @@ func TestExecuteSetOrientation(t *testing.T) {
 	}
 }
 
+// TestExecuteSetLocation tests setLocation is routed through Execute (real-device
+// path returns the unsupported error rather than the default "step type not
+// supported on iOS" fallback that was reported in issue #82).
+func TestExecuteSetLocation(t *testing.T) {
+	server := mockWDAServerForDriver()
+	defer server.Close()
+	driver := createTestDriver(server)
+
+	step := &flow.SetLocationStep{Latitude: "37.7749", Longitude: "-122.4194"}
+	result := driver.Execute(step)
+
+	if result.Success {
+		t.Fatal("expected setLocation to fail on default (non-simulator) test driver")
+	}
+	// Must NOT hit the default "Step type '*flow.SetLocationStep' is not supported on iOS"
+	// branch — the dispatch case should route to setLocation and produce the real-device
+	// unsupported error instead.
+	if strings.Contains(result.Message, "is not supported on iOS") {
+		t.Errorf("setLocation hit default unsupported branch — dispatch case missing: %s", result.Message)
+	}
+}
+
 // TestExecuteOpenLink tests link opening
 func TestExecuteOpenLink(t *testing.T) {
 	server := mockWDAServerForDriver()
