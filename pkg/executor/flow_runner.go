@@ -120,8 +120,19 @@ func (fr *FlowRunner) Run() FlowResult {
 	// Ensure a WDA session exists before execution starts.
 	// If launchApp runs later, it reuses this session and updates settings.
 	// Use Unwrap to reach through wrapper layers (e.g. FlutterDriver).
-	if ensurer, ok := core.Unwrap(fr.driver).(core.SessionEnsurer); ok {
-		appID := fr.flow.Config.EffectiveAppID()
+	innerDriver := core.Unwrap(fr.driver)
+	// Let the driver inspect the flow before session creation. The WDA
+	// driver uses this to register XCTest's alert monitor only when the
+	// flow contains a launchApp step (matches maestro's behavior of
+	// auto-handling permission alerts only when permissions are configured).
+	if preparer, ok := innerDriver.(core.FlowAware); ok {
+		preparer.PrepareForFlow(fr.flow.Steps)
+	}
+	if ensurer, ok := innerDriver.(core.SessionEnsurer); ok {
+		// Expand ${VAR} placeholders in top-level appId so CLI -e variables
+		// substitute correctly (the YAML's appId field doesn't go through
+		// ExpandStep — that runs on step selectors, not flow config).
+		appID := fr.script.ExpandVariables(fr.flow.Config.EffectiveAppID())
 		if appID != "" {
 			if err := ensurer.EnsureSession(appID); err != nil {
 				logger.Warn("failed to ensure session: %v", err)
@@ -350,26 +361,33 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 		fr.subCommands = nil
 		result = fr.executeRunFlow(s)
 
-	// App lifecycle steps - inject flow's appId/url if not specified
+	// App lifecycle steps - inject flow's appId/url if not specified.
+	// ExpandStep above runs BEFORE the config copy, so any ${VAR} in the
+	// flow's top-level `appId:` would otherwise leak through unexpanded.
+	// Re-expand after the copy so CLI -e variables substitute correctly.
 	case *flow.LaunchAppStep:
 		if s.AppID == "" {
 			s.AppID = fr.flow.Config.EffectiveAppID()
 		}
+		s.AppID = fr.script.ExpandVariables(s.AppID)
 		result = fr.driver.Execute(step)
 	case *flow.StopAppStep:
 		if s.AppID == "" {
 			s.AppID = fr.flow.Config.EffectiveAppID()
 		}
+		s.AppID = fr.script.ExpandVariables(s.AppID)
 		result = fr.driver.Execute(step)
 	case *flow.KillAppStep:
 		if s.AppID == "" {
 			s.AppID = fr.flow.Config.EffectiveAppID()
 		}
+		s.AppID = fr.script.ExpandVariables(s.AppID)
 		result = fr.driver.Execute(step)
 	case *flow.ClearStateStep:
 		if s.AppID == "" {
 			s.AppID = fr.flow.Config.EffectiveAppID()
 		}
+		s.AppID = fr.script.ExpandVariables(s.AppID)
 		result = fr.driver.Execute(step)
 
 	// EvalBrowserScript - execute JS in browser, store output variable

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -21,8 +22,18 @@ import (
 const (
 	wdaBasePort    = uint16(8100)
 	wdaPortRange   = uint16(1000)
-	buildTimeout   = 10 * time.Minute
-	startupTimeout = 90 * time.Second
+	buildTimeout = 10 * time.Minute
+	// startupTimeout covers the full window from invoking
+	// `xcodebuild test-without-building` to WDA's FBWebServer printing
+	// "ServerURLHere->...". On CI macos-latest with Xcode 26.3 + iOS 26
+	// simulator, the xcodebuild bootstrap + test-runtime spawn alone
+	// consumes ~75 seconds before XCTest even prints "Running tests..."
+	// (vs ~10s on a fast local Mac). At 90s the budget left for WDA's
+	// own startup was only ~15s — too tight, flaked ~67% of soak runs.
+	// 300s gives enough headroom for the slowest CI path without making
+	// the fast local path noticeably slower (it succeeds well before
+	// timeout regardless).
+	startupTimeout = 300 * time.Second
 )
 
 // Runner handles building and running WDA on iOS devices.
@@ -446,7 +457,19 @@ func (r *Runner) getIOSVersion() (string, error) {
 }
 
 func (r *Runner) destination() string {
-	return fmt.Sprintf("id=%s", r.deviceUDID)
+	// On Xcode 26 + iOS 26 simulators, xcodebuild's destination resolver
+	// returns BOTH arm64 and x86_64 entries for the same UDID and warns
+	// "Using the first of multiple matching destinations". The cached
+	// xctestrun is built arm64-only on Apple Silicon hosts, so picking
+	// the x86_64 variant leaves testmanagerd never spawning the test
+	// bundle and `xcodebuild test-without-building` stalls past 90s
+	// without ever emitting ServerURLHere. Pin platform + arch explicitly
+	// so the resolver gets a single concrete destination.
+	isSim, _ := r.isSimulator()
+	if isSim {
+		return fmt.Sprintf("platform=iOS Simulator,arch=%s,id=%s", runtime.GOARCH, r.deviceUDID)
+	}
+	return fmt.Sprintf("platform=iOS,id=%s", r.deviceUDID)
 }
 
 func (r *Runner) derivedDataPath() string {

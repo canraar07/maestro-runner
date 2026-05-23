@@ -40,6 +40,13 @@ type iosDeviceInfo struct {
 // CreateIOSDriver creates an iOS driver using WebDriverAgent.
 // Exported for library use.
 func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
+	// Phase 4 — devicelab driver branch. Mirrors --driver devicelab on Android.
+	// Routes to the XCUITest-based runner (pkg/driver/devicelab_ios) instead
+	// of WebDriverAgent. Simulator-only in Phase 4.
+	if strings.EqualFold(cfg.Driver, "devicelab") {
+		return createDevicelabIOSDriver(cfg)
+	}
+
 	udid := getFirstDevice(cfg)
 
 	if udid == "" {
@@ -87,18 +94,13 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		printSetupSuccess("App installed")
 	}
 
-	// 2. Check if WDA is installed
+	// 2. Verify bundled WDA is present (no auto-download — releases ship WDA)
 	if !cfg.NoDriverInstall {
 		printSetupStep("Checking WDA installation...")
-		if !wdadriver.IsWDAInstalled() {
-			printSetupStep("Downloading WDA...")
-			if _, err := wdadriver.Setup(); err != nil {
-				return nil, nil, fmt.Errorf("WDA setup failed: %w", err)
-			}
-			printSetupSuccess("WDA installed")
-		} else {
-			printSetupSuccess("WDA already installed")
+		if _, err := wdadriver.Setup(); err != nil {
+			return nil, nil, fmt.Errorf("WDA setup failed: %w", err)
 		}
+		printSetupSuccess("WDA installed")
 	}
 
 	// 3. Create WDA runner

@@ -5843,16 +5843,16 @@ func TestSimpleSelectorWithIDAndIndex(t *testing.T) {
 	}
 }
 
-// TestDriverAlertActionField tests that alertAction field can be set on Driver.
+// TestDriverAlertActionField tests that alertAction defaults to "" (no
+// auto-handling at session creation). PrepareForFlow opts back in to
+// "accept"/"dismiss" when the flow has a launchApp step.
 func TestDriverAlertActionField(t *testing.T) {
 	client := &Client{}
 	info := &core.PlatformInfo{Platform: "ios"}
 	driver := NewDriver(client, info, "test-udid")
 
-	// Default to "accept" so EnsureSession enables WDA's alerts monitor —
-	// matches Maestro's documented default of accepting all permissions.
-	if driver.alertAction != "accept" {
-		t.Errorf("Expected default alertAction 'accept', got '%s'", driver.alertAction)
+	if driver.alertAction != "" {
+		t.Errorf("Expected default alertAction '', got '%s'", driver.alertAction)
 	}
 
 	driver.alertAction = "dismiss"
@@ -5860,10 +5860,55 @@ func TestDriverAlertActionField(t *testing.T) {
 		t.Errorf("Expected 'dismiss', got '%s'", driver.alertAction)
 	}
 
-	driver.alertAction = ""
-	if driver.alertAction != "" {
-		t.Errorf("Expected '', got '%s'", driver.alertAction)
+	driver.alertAction = "accept"
+	if driver.alertAction != "accept" {
+		t.Errorf("Expected 'accept', got '%s'", driver.alertAction)
 	}
+}
+
+// TestDriver_PrepareForFlow tests that PrepareForFlow scans for a
+// LaunchAppStep and sets alertAction to match resolveAlertAction's verdict.
+func TestDriver_PrepareForFlow(t *testing.T) {
+	mk := func() *Driver {
+		return NewDriver(&Client{}, &core.PlatformInfo{Platform: "ios"}, "test-udid")
+	}
+
+	t.Run("no launchApp leaves alertAction empty", func(t *testing.T) {
+		d := mk()
+		d.PrepareForFlow([]flow.Step{&flow.StopAppStep{}, &flow.OpenLinkStep{}})
+		if d.alertAction != "" {
+			t.Errorf("Expected '', got %q", d.alertAction)
+		}
+	})
+
+	t.Run("launchApp with no permissions sets accept", func(t *testing.T) {
+		d := mk()
+		d.PrepareForFlow([]flow.Step{&flow.LaunchAppStep{}})
+		if d.alertAction != "accept" {
+			t.Errorf("Expected 'accept', got %q", d.alertAction)
+		}
+	})
+
+	t.Run("launchApp with all-deny sets dismiss", func(t *testing.T) {
+		d := mk()
+		d.PrepareForFlow([]flow.Step{
+			&flow.LaunchAppStep{Permissions: map[string]string{"all": "deny"}},
+		})
+		if d.alertAction != "dismiss" {
+			t.Errorf("Expected 'dismiss', got %q", d.alertAction)
+		}
+	})
+
+	t.Run("first launchApp wins when multiple present", func(t *testing.T) {
+		d := mk()
+		d.PrepareForFlow([]flow.Step{
+			&flow.LaunchAppStep{Permissions: map[string]string{"all": "allow"}},
+			&flow.LaunchAppStep{Permissions: map[string]string{"all": "deny"}},
+		})
+		if d.alertAction != "accept" {
+			t.Errorf("Expected 'accept' (first launchApp wins), got %q", d.alertAction)
+		}
+	})
 }
 
 // TestSelectorLog covers the small helper used by the actionability
