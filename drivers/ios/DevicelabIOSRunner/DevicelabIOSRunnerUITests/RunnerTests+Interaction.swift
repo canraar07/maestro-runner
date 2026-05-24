@@ -308,6 +308,14 @@ extension RunnerTests {
       let timing = measureGesture {
         matchedButton.tap()
       }
+      // Alert taps trigger a dismiss → underlying cascade (e.g. an
+      // alert "Discard" can kick off a navigation pop). There's a
+      // brief moment of "false stability" right after the alert
+      // dismisses but before the cascade animation actually starts.
+      // Wait for the tree to truly settle so the next tap (which
+      // will only do a pre-tap settle) doesn't get dropped by the
+      // gesture system mid-cascade.
+      waitForTreeStable(app: app, timeoutSeconds: 0.8)
       return Response(
         ok: true,
         data: DataPayload(
@@ -324,12 +332,46 @@ extension RunnerTests {
     return nil
   }
 
-  // findLiberalMatch walks the full XCUI tree ONCE, applies the same
-  // semantics as the Go-side, and returns the best match. Callers (the
-  // find-and-act handlers like tapBySelector) use it to do the action
-  // atomically — returning small {ok:true} on hit or {ok:false, snapshot:N}
-  // on miss so the Go side can fall back to its own snapshot+filter+act
-  // path. No node cap; we walk the whole tree.
+  // waitForTreeStable polls app.snapshot() until two consecutive
+  // snapshots produce the same tree signature, or the budget expires.
+  // Same idea as the awaitIdle command but inline — used by paths that
+  // need to wait for animation completion right where they are (e.g.
+  // tryTapAlertButton after dismissing an alert, before returning).
+  func waitForTreeStable(app: XCUIApplication, timeoutSeconds: TimeInterval) {
+    let started = Date()
+    var prevSig: UInt64? = nil
+    while Date().timeIntervalSince(started) < timeoutSeconds {
+      guard let snap = try? app.snapshot() else { return }
+      let sig = treeSignature(of: snap)
+      if let prev = prevSig, prev == sig {
+        return
+      }
+      prevSig = sig
+    }
+  }
+
+  // findLiberalMatch walks the XCUI tree, applies the same selector
+  // semantics as the Go-side (substring + case-insensitive + exact-match-
+  // preference + prefer-editable-inputs ranking), and returns the best
+  // match.
+  //
+  // The loop ALSO doubles as the animation-end gate: it walks the tree,
+  // and in the same pass computes a tree signature (hash of all node
+  // geometries). When two consecutive snapshots produce the same
+  // signature → the screen has settled → the match's frame is trustworthy
+  // and we can return.
+  //
+  // Why this is one loop and not "find then refresh-frame": doing it in
+  // one walk per iteration saves O(N) per iteration vs the previous
+  // two-pass design (one walk to find, separate walks to verify frame
+  // stability). It also ensures the matched element comes from the SAME
+  // snapshot we judged stable — no race window between "screen settled"
+  // and "use match from older snapshot".
+  //
+  // Budget: up to 600ms (~15 iters of ~40ms each). For a fully static
+  // screen the loop exits at iter 2 (~80ms). Mid-animation extends until
+  // tree stops changing or budget exhausted (then we tap at whatever
+  // frame we last saw, same fallback as before).
 
   struct LiberalMatchResult {
     let matched: XCUIElementSnapshot?
@@ -341,24 +383,11 @@ extension RunnerTests {
     selectorKey: String,
     selectorValue: String
   ) -> LiberalMatchResult {
-    let rootSnapshot: XCUIElementSnapshot
-    do {
-      rootSnapshot = try app.snapshot()
-    } catch {
-      return LiberalMatchResult(matched: nil, walkedNodes: [])
-    }
-
     let needle = selectorValue.trimmingCharacters(in: .whitespacesAndNewlines)
     if needle.isEmpty {
       return LiberalMatchResult(matched: nil, walkedNodes: [])
     }
     let needleLower = needle.lowercased()
-
-    var allNodes: [SnapshotNode] = []
-    // matchKind 0 = exact (case-insensitive equality on any matching attribute),
-    // matchKind 1 = substring. Exact wins over substring regardless of type rank,
-    // so a dialog's "Discard" button beats a screen-level "Discard and go back".
-    var matches: [(XCUIElementSnapshot, Int, Int)] = []  // (snapshot, matchKind, typeRank)
 
     func typeRank(_ t: XCUIElement.ElementType) -> Int {
       switch t {
@@ -394,128 +423,93 @@ extension RunnerTests {
       }
     }
 
-    func walk(_ snap: XCUIElementSnapshot, depth: Int, parentIdx: Int?) {
-      let label = snap.label.trimmingCharacters(in: .whitespacesAndNewlines)
-      let identifier = snap.identifier.trimmingCharacters(in: .whitespacesAndNewlines)
-      let valueText = String(describing: snap.value ?? "")
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-      let nodeIdx = allNodes.count
-      allNodes.append(SnapshotNode(
-        index: nodeIdx,
-        type: elementTypeName(snap.elementType),
-        label: label.isEmpty ? nil : label,
-        identifier: identifier.isEmpty ? nil : identifier,
-        value: valueText.isEmpty ? nil : valueText,
-        placeholderValue: nil,
-        rect: snapshotRect(from: snap.frame),
-        enabled: snap.isEnabled,
-        focused: nil,
-        selected: snap.isSelected ? true : nil,
-        hittable: false,
-        depth: depth,
-        parentIndex: parentIdx,
-        hiddenContentAbove: nil,
-        hiddenContentBelow: nil
-      ))
-      if let kind = nodeMatchKind(label: label, identifier: identifier, valueText: valueText) {
-        // Drop empty-bounds matches (would tap at 0,0) — they're noise.
-        if !snap.frame.isNull && !snap.frame.isEmpty {
-          matches.append((snap, kind, typeRank(snap.elementType)))
-        }
-      }
-      for child in snap.children {
-        walk(child, depth: depth + 1, parentIdx: nodeIdx)
-      }
-    }
+    // walkOnce: one snapshot, one DFS — produces (match-candidates,
+    // tree-signature, flat node list) in a single pass. We accumulate
+    // hash bits into a Hasher as we visit each node and collect matches
+    // along the way.
+    func walkOnce(root: XCUIElementSnapshot) -> (XCUIElementSnapshot?, UInt64, [SnapshotNode]) {
+      var hasher = Hasher()
+      var allNodes: [SnapshotNode] = []
+      var matches: [(XCUIElementSnapshot, Int, Int)] = []
 
-    walk(rootSnapshot, depth: 0, parentIdx: nil)
-    // Stable sort: exact match first, then by element type. Within equal rank,
-    // walk order is preserved (alert hits come first since walked first).
-    matches.sort { ($0.1, $0.2) < ($1.1, $1.2) }
-    return LiberalMatchResult(matched: matches.first?.0, walkedNodes: allNodes)
-  }
+      func walk(_ snap: XCUIElementSnapshot, depth: Int, parentIdx: Int?) {
+        // Tree-signature contribution: geometry + identity bits.
+        hasher.combine(snap.elementType.rawValue)
+        hasher.combine(snap.identifier)
+        hasher.combine(snap.label)
+        hasher.combine(Int(snap.frame.origin.x))
+        hasher.combine(Int(snap.frame.origin.y))
+        hasher.combine(Int(snap.frame.size.width))
+        hasher.combine(Int(snap.frame.size.height))
 
-  // refreshSnapshotFrame returns a settled frame for the element matching
-  // `prior` (by elementType + label + id). It re-snapshots in a short loop
-  // until consecutive snapshots agree on the frame, or a budget expires.
-  //
-  // Why: the snapshot grabbed inside findLiberalMatch can catch elements
-  // mid-animation, freezing their frames at a transitional position. A
-  // single re-snapshot a moment later usually still falls inside the
-  // animation. We need two adjacent snapshots that agree before trusting
-  // the frame, which only happens after the animation settles.
-  //
-  // Budget: 4 attempts × 50ms = 200ms worst case for stable elements.
-  // Falls back to the prior frame if the element can't be re-found or
-  // never settles in budget (rare — at worst we tap at the last known
-  // frame, same as the previous behavior).
-  func refreshSnapshotFrame(app: XCUIApplication, prior: XCUIElementSnapshot) -> CGRect {
-    let fallback = prior.frame
-    let priorLabel = prior.label.trimmingCharacters(in: .whitespacesAndNewlines)
-    let priorId = prior.identifier.trimmingCharacters(in: .whitespacesAndNewlines)
-    let priorType = prior.elementType
-
-    func findFrame(in root: XCUIElementSnapshot) -> CGRect? {
-      var found: CGRect?
-      func walk(_ snap: XCUIElementSnapshot) {
-        if found != nil { return }
-        if snap.elementType == priorType {
-          let snapLabel = snap.label.trimmingCharacters(in: .whitespacesAndNewlines)
-          let snapId = snap.identifier.trimmingCharacters(in: .whitespacesAndNewlines)
-          let labelEq = !priorLabel.isEmpty && snapLabel == priorLabel
-          let idEq = !priorId.isEmpty && snapId == priorId
-          let matches: Bool
-          if !priorId.isEmpty && !priorLabel.isEmpty {
-            matches = idEq && labelEq
-          } else if !priorId.isEmpty {
-            matches = idEq
-          } else if !priorLabel.isEmpty {
-            matches = labelEq
-          } else {
-            matches = false
-          }
-          if matches && !snap.frame.isNull && !snap.frame.isEmpty {
-            found = snap.frame
-            return
+        // Match-candidate collection + flat-node serialisation.
+        let label = snap.label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let identifier = snap.identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let valueText = String(describing: snap.value ?? "")
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        let nodeIdx = allNodes.count
+        allNodes.append(SnapshotNode(
+          index: nodeIdx,
+          type: elementTypeName(snap.elementType),
+          label: label.isEmpty ? nil : label,
+          identifier: identifier.isEmpty ? nil : identifier,
+          value: valueText.isEmpty ? nil : valueText,
+          placeholderValue: nil,
+          rect: snapshotRect(from: snap.frame),
+          enabled: snap.isEnabled,
+          focused: nil,
+          selected: snap.isSelected ? true : nil,
+          hittable: false,
+          depth: depth,
+          parentIndex: parentIdx,
+          hiddenContentAbove: nil,
+          hiddenContentBelow: nil
+        ))
+        if let kind = nodeMatchKind(label: label, identifier: identifier, valueText: valueText) {
+          if !snap.frame.isNull && !snap.frame.isEmpty {
+            matches.append((snap, kind, typeRank(snap.elementType)))
           }
         }
         for child in snap.children {
-          walk(child)
+          walk(child, depth: depth + 1, parentIdx: nodeIdx)
         }
       }
-      walk(root)
-      return found
+      walk(root, depth: 0, parentIdx: nil)
+
+      matches.sort { ($0.1, $0.2) < ($1.1, $1.2) }
+      let sig = UInt64(bitPattern: Int64(hasher.finalize()))
+      return (matches.first?.0, sig, allNodes)
     }
 
-    // Require 3 consecutive equal snapshots (not 2) — a transition can
-    // catch two adjacent snapshots at the same frame just by sampling
-    // luck (animation curves slow down near the end). Three consecutive
-    // hits = ~150ms of frame stability, which empirically clears React
-    // Native screen-pop animations on iOS 26 simulators.
-    var lastFrame: CGRect? = nil
-    var consecutive = 0
-    for _ in 0..<8 {
-      let snap: XCUIElementSnapshot
+    let started = Date()
+    let timeout = 0.6  // 600ms budget for animation-end + find
+    var prevSig: UInt64? = nil
+    var lastMatch: XCUIElementSnapshot? = nil
+    var lastNodes: [SnapshotNode] = []
+
+    for _ in 0..<15 {
+      let root: XCUIElementSnapshot
       do {
-        snap = try app.snapshot()
+        root = try app.snapshot()
       } catch {
-        return lastFrame ?? fallback
+        return LiberalMatchResult(matched: lastMatch, walkedNodes: lastNodes)
       }
-      guard let frame = findFrame(in: snap) else {
-        return lastFrame ?? fallback
+      let (match, sig, nodes) = walkOnce(root: root)
+      lastMatch = match
+      lastNodes = nodes
+      // Two consecutive identical signatures = settled. Match's frame
+      // came from THIS snapshot, so it's trustworthy.
+      if let prev = prevSig, prev == sig {
+        return LiberalMatchResult(matched: match, walkedNodes: nodes)
       }
-      if let last = lastFrame, last == frame {
-        consecutive += 1
-        if consecutive >= 2 {  // 2 deltas == 3 equal snapshots
-          return frame
-        }
-      } else {
-        consecutive = 0
+      prevSig = sig
+      if Date().timeIntervalSince(started) > timeout {
+        break
       }
-      lastFrame = frame
-      Thread.sleep(forTimeInterval: 0.06)
     }
-    return lastFrame ?? fallback
+    // Budget exhausted — return the last walk's data. Same fallback the
+    // previous code took on timeout.
+    return LiberalMatchResult(matched: lastMatch, walkedNodes: lastNodes)
   }
 
   func queryElement(app: XCUIApplication, selectorKey: String, selectorValue: String) -> Response {

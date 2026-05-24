@@ -417,18 +417,18 @@ extension RunnerTests {
       if let alertResp = tryTapAlertButton(app: activeApp, selectorKey: selectorKey, selectorValue: selectorValue) {
         return alertResp
       }
+      // findLiberalMatch's loop doubles as the animation-end gate:
+      // it walks the tree per iteration, computes a tree signature
+      // in the same pass, and returns only after two consecutive
+      // identical signatures — meaning the screen is settled and the
+      // match's frame is trustworthy. No separate refresh pass needed.
       let result = findLiberalMatch(app: activeApp, selectorKey: selectorKey, selectorValue: selectorValue)
       guard let matched = result.matched else {
         // Miss — return walked nodes so Go-side fallback can re-filter.
         return Response(ok: false, data: DataPayload(nodes: result.walkedNodes))
       }
-      // Re-snapshot to get a fresh frame — the snapshot inside
-      // findLiberalMatch may have caught the element mid-animation, with
-      // a transitional frame that won't land us on the element by the
-      // time the tap fires.
-      let freshFrame = refreshSnapshotFrame(app: activeApp, prior: matched)
-      let x = Double(freshFrame.midX)
-      let y = Double(freshFrame.midY)
+      let x = Double(matched.frame.midX)
+      let y = Double(matched.frame.midY)
       let touchFrame = resolvedTouchVisualizationFrame(app: activeApp, x: x, y: y)
       var outcome = RunnerInteractionOutcome.performed
       let timing = measureGesture {
