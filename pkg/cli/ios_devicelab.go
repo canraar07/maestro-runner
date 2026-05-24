@@ -72,7 +72,11 @@ func createDevicelabIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 	client, runner, err := dliosdriver.Setup(ctx, dliosdriver.SetupOptions{
 		ArtifactsDir:  artifactsDir,
 		SimulatorUDID: udid,
-		ReadyTimeout:  90 * time.Second,
+		// CI macos-latest can take 2-3 min for xcodebuild test-without-
+		// building to start the XCTest runner and have its HTTP listener
+		// answer the uptime ping. Local M-series Macs need <30s. 300s
+		// covers both — matches the equivalent bump we did for WDA.
+		ReadyTimeout: 300 * time.Second,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("runner setup failed: %w", err)
