@@ -16,6 +16,14 @@ type CommandType string
 
 const (
 	CmdTap              CommandType = "tap"
+	// CmdTapBySelector — local extension. The runner walks its full XCUI
+	// tree, finds the best liberal match (substring + case-insensitive +
+	// prefer-editable-inputs ranking, mirroring Go-side matchesSelector),
+	// taps at its center, returns {ok:true} on hit or {ok:false, snapshot}
+	// on miss so the Go side can fall back to the existing snapshot+filter
+	// path. Used by handleTapOn for simple id/text selectors as a faster
+	// + more reliable alternative to the two-trip snapshot+filter+tap.
+	CmdTapBySelector    CommandType = "tapBySelector"
 	CmdMouseClick       CommandType = "mouseClick"
 	CmdTapSeries        CommandType = "tapSeries"
 	CmdLongPress        CommandType = "longPress"

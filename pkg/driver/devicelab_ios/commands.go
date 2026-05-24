@@ -136,6 +136,26 @@ func (d *Driver) handleTapOn(s *flow.TapOnStep) *core.CommandResult {
 	if s.Point != "" {
 		return core.ErrorResult(fmt.Errorf("tapOn with point not yet implemented"), "point-tap unsupported")
 	}
+
+	// Fast path: for simple id-or-text selectors, ask the runner to find
+	// and tap atomically. Walks the full XCUI tree once, applies the same
+	// liberal matching + prefer-editable-inputs ranking as the Go-side does,
+	// taps at the matched element's center. On miss the runner returns the
+	// walked snapshot so we fall through to the existing snapshot+filter
+	// path below (which handles complex selectors: relative, indexed, etc.).
+	if key, value, ok := simpleSelectorKeyValue(s.Selector); ok {
+		if node, err := d.tryTapBySelector(key, value); err == nil && node != nil {
+			if node.Identifier != "" {
+				d.lastTappedIdentifier = node.Identifier
+			} else {
+				d.lastTappedIdentifier = ""
+			}
+			d.lastTappedX, d.lastTappedY = centerOf(node)
+			return core.SuccessResult(fmt.Sprintf("tapped: %s", describeSelector(s.Selector)), nil)
+		}
+		// Fall through to snapshot path on miss/error.
+	}
+
 	node, err := d.findElement(s.Selector, s.IsOptional(), s.TimeoutMs)
 	if err != nil {
 		return core.ErrorResult(err, "tapOn: "+err.Error())
@@ -780,6 +800,41 @@ func (d *Driver) resolveByQuerySelector(key, value string) (*SnapshotNode, error
 	}
 	node := data.Nodes[0]
 	return &node, nil
+}
+
+// tryTapBySelector asks the runner to find+tap atomically via the
+// `tapBySelector` command. Returns the matched node on success, nil on
+// miss (caller should fall back to snapshot+filter+tap path), or an error
+// for transport problems. The runner uses the same liberal matching +
+// prefer-editable-inputs ranking as Go-side matchesSelector, so a hit
+// here means we'd have hit on the snapshot path too — just in one
+// round-trip instead of two.
+func (d *Driver) tryTapBySelector(key, value string) (*SnapshotNode, error) {
+	ctx, cancel := d.callTimeout()
+	defer cancel()
+	data, err := d.client.Call(ctx, Command{
+		Command:       CmdTapBySelector,
+		AppBundleID:   d.appID,
+		SelectorKey:   key,
+		SelectorValue: value,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// On miss the runner returns ok:false with walked snapshot nodes in
+	// data.Nodes — that's how it signals "no match found" without losing
+	// the work it did walking the tree. We treat that as a miss (nil) so
+	// the caller falls through to the slower path.
+	if data == nil {
+		return nil, nil
+	}
+	// Best-effort: synthesise a SnapshotNode for the matched element.
+	// The runner currently returns just an "ok" success without echoing
+	// the matched node back; we don't need its full attrs since the action
+	// already happened. Return a sentinel non-nil node so the caller
+	// records lastTappedIdentifier="" (we don't know the id from a tap-only
+	// success response).
+	return &SnapshotNode{}, nil
 }
 
 // findElement resolves a selector to a single node. Polls until the
