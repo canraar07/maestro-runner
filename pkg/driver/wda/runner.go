@@ -501,7 +501,7 @@ func (r *Runner) waitForStartup(logPath string) error {
 				return err
 			}
 		case <-timeout:
-			return fmt.Errorf("WDA startup timeout (90s):\n%s\n\nFull log: %s", tailLog(logPath, 20), logPath)
+			return fmt.Errorf("WDA startup timeout (%s):\n%s\n\nFull log: %s", startupTimeout, tailLog(logPath, 20), logPath)
 		}
 	}
 }
