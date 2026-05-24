@@ -47,20 +47,27 @@ func createDevicelabIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		printSetupSuccess("App installed")
 	}
 
+	// $DEVICELAB_IOS_RUNNER_ARTIFACTS_DIR overrides the bundled-source path
+	// for local development (point at a derived-data dir built manually).
+	// Otherwise: build from the vendored source on first run, cache for
+	// subsequent runs (same UX as the WDA driver).
+	ctx := context.Background()
 	artifactsDir := os.Getenv("DEVICELAB_IOS_RUNNER_ARTIFACTS_DIR")
 	if artifactsDir == "" {
-		home, _ := os.UserHomeDir()
-		artifactsDir = filepath.Join(home, ".devicelab-ios-runner/derived")
-	}
-	if _, err := os.Stat(filepath.Join(artifactsDir, "Build/Products")); err != nil {
-		return nil, nil, fmt.Errorf("devicelab iOS runner artifacts not found at %s. "+
-			"Build them first: cd /Users/omnarayan/work/support-tools/devicelab-ios-runner && scripts/build.sh", artifactsDir)
+		var err error
+		printSetupStep("Resolving devicelab iOS runner build...")
+		artifactsDir, err = dliosdriver.EnsureBuilt(ctx, udid)
+		if err != nil {
+			return nil, nil, fmt.Errorf("devicelab iOS runner: %w", err)
+		}
+		printSetupSuccess(fmt.Sprintf("Runner build: %s", filepath.Base(artifactsDir)))
+	} else if _, err := os.Stat(filepath.Join(artifactsDir, "Build/Products")); err != nil {
+		return nil, nil, fmt.Errorf("DEVICELAB_IOS_RUNNER_ARTIFACTS_DIR points at %s but no Build/Products dir is present", artifactsDir)
 	}
 
 	printSetupStep("Starting devicelab iOS runner...")
 	logger.Info("Launching devicelab-ios-runner from %s on simulator %s", artifactsDir, udid)
 
-	ctx := context.Background()
 	client, runner, err := dliosdriver.Setup(ctx, dliosdriver.SetupOptions{
 		ArtifactsDir:  artifactsDir,
 		SimulatorUDID: udid,
