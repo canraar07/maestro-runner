@@ -144,13 +144,10 @@ func (d *Driver) handleTapOn(s *flow.TapOnStep) *core.CommandResult {
 	// walked snapshot so we fall through to the existing snapshot+filter
 	// path below (which handles complex selectors: relative, indexed, etc.).
 	if key, value, ok := simpleSelectorKeyValue(s.Selector); ok {
-		if node, err := d.tryTapBySelector(key, value); err == nil && node != nil {
-			if node.Identifier != "" {
-				d.lastTappedIdentifier = node.Identifier
-			} else {
-				d.lastTappedIdentifier = ""
-			}
-			d.lastTappedX, d.lastTappedY = centerOf(node)
+		if hit, err := d.tryTapBySelector(key, value); err == nil && hit != nil {
+			d.lastTappedIdentifier = hit.Identifier
+			d.lastTappedX, d.lastTappedY = hit.X, hit.Y
+			d.lastTapHasCoords = true
 			return core.SuccessResult(fmt.Sprintf("tapped: %s", describeSelector(s.Selector)), nil)
 		}
 		// Fall through to snapshot path on miss/error.
@@ -802,14 +799,25 @@ func (d *Driver) resolveByQuerySelector(key, value string) (*SnapshotNode, error
 	return &node, nil
 }
 
+// tapBySelectorHit summarises a successful tapBySelector response. The
+// runner echoes back the tap coordinates and the matched element's
+// identifier so the caller can populate d.lastTapped{X,Y,Identifier} —
+// inputText reads those to hint the runner at which editable element to
+// focus.
+type tapBySelectorHit struct {
+	X          float64
+	Y          float64
+	Identifier string
+}
+
 // tryTapBySelector asks the runner to find+tap atomically via the
-// `tapBySelector` command. Returns the matched node on success, nil on
-// miss (caller should fall back to snapshot+filter+tap path), or an error
-// for transport problems. The runner uses the same liberal matching +
-// prefer-editable-inputs ranking as Go-side matchesSelector, so a hit
-// here means we'd have hit on the snapshot path too — just in one
-// round-trip instead of two.
-func (d *Driver) tryTapBySelector(key, value string) (*SnapshotNode, error) {
+// `tapBySelector` command. Returns the tap-coordinates + matched
+// identifier on success, nil on miss (caller falls back to
+// snapshot+filter+tap path), or an error for transport problems.
+// The runner uses the same liberal matching + prefer-editable-inputs
+// ranking as Go-side matchesSelector, so a hit here means we'd have hit
+// on the snapshot path too — just in one round-trip instead of two.
+func (d *Driver) tryTapBySelector(key, value string) (*tapBySelectorHit, error) {
 	ctx, cancel := d.callTimeout()
 	defer cancel()
 	data, err := d.client.Call(ctx, Command{
@@ -825,16 +833,14 @@ func (d *Driver) tryTapBySelector(key, value string) (*SnapshotNode, error) {
 	// data.Nodes — that's how it signals "no match found" without losing
 	// the work it did walking the tree. We treat that as a miss (nil) so
 	// the caller falls through to the slower path.
-	if data == nil {
+	if data == nil || data.X == nil || data.Y == nil {
 		return nil, nil
 	}
-	// Best-effort: synthesise a SnapshotNode for the matched element.
-	// The runner currently returns just an "ok" success without echoing
-	// the matched node back; we don't need its full attrs since the action
-	// already happened. Return a sentinel non-nil node so the caller
-	// records lastTappedIdentifier="" (we don't know the id from a tap-only
-	// success response).
-	return &SnapshotNode{}, nil
+	return &tapBySelectorHit{
+		X:          *data.X,
+		Y:          *data.Y,
+		Identifier: data.Identifier,
+	}, nil
 }
 
 // findElement resolves a selector to a single node. Polls until the

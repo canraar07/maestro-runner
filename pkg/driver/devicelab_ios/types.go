@@ -132,6 +132,10 @@ type ResponseData struct {
 	Orientation          string         `json:"orientation,omitempty"`
 	PngBase64            string         `json:"pngBase64,omitempty"`
 	DiffFraction         *float64       `json:"diffFraction,omitempty"`
+	// Identifier — runner-side extension. Set by tapBySelector so the Go
+	// side can populate lastTappedIdentifier for the next inputText to
+	// hint the type command at which element to focus.
+	Identifier string `json:"identifier,omitempty"`
 }
 
 // SnapshotNode mirrors the Swift wire model. Tree is reconstructed by
