@@ -219,6 +219,29 @@ extension RunnerTests {
   // is liberal (substring + case-insensitive + prefer-editable-inputs) but
   // expensive (two HTTP round-trips: snapshot + tap, with 300-node cap).
   //
+  // treeSignature builds a stable hash of the accessibility tree's
+  // geometry — the bits we care about for "is the UI ready for
+  // interaction": element type, identifier, label, and integer-rounded
+  // frame. Iterates depth-first, hashes each node into a Hasher, returns
+  // the final hash. Sub-pixel jitter from CALayer hairlines or display-
+  // link timing doesn't count as "still animating" (frames are rounded
+  // to int).
+  func treeSignature(of snapshot: XCUIElementSnapshot) -> UInt64 {
+    var hasher = Hasher()
+    func walk(_ s: XCUIElementSnapshot) {
+      hasher.combine(s.elementType.rawValue)
+      hasher.combine(s.identifier)
+      hasher.combine(s.label)
+      hasher.combine(Int(s.frame.origin.x))
+      hasher.combine(Int(s.frame.origin.y))
+      hasher.combine(Int(s.frame.size.width))
+      hasher.combine(Int(s.frame.size.height))
+      for child in s.children { walk(child) }
+    }
+    walk(snapshot)
+    return UInt64(bitPattern: Int64(hasher.finalize()))
+  }
+
   // tryTapAlertButton handles the very common case of "tap a button in an
   // active UIAlertController". Alerts present in a separate UIWindow, so
   // their button frames don't translate to the main app's coordinate space —

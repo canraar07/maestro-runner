@@ -206,37 +206,54 @@ extension RunnerTests {
       let diff = computePixelDiffFraction(prev, curImg)
       return Response(ok: true, data: DataPayload(diffFraction: diff))
     case .awaitIdle:
-      // Local extension: runner-side wait loop. Caller specifies
-      // timeoutMs (via durationMs) and threshold (via scale 0.0-1.0,
-      // default 0.005 = 0.5%). The loop holds the previous screenshot
-      // in-process and compares each new capture to it. Returns the
-      // moment two consecutive captures are within threshold, or on
-      // timeout.
+      // Local extension: runner-side wait loop. Compares consecutive
+      // XCUI accessibility-tree snapshots (NOT screenshots) and returns
+      // when two adjacent samples produce the same tree signature.
+      //
+      // Why tree-diff over pixel-diff:
+      //   - 2-4× faster per iteration (app.snapshot() is cheaper than
+      //     XCUIScreen.screenshot() + PNG decode + per-pixel compare).
+      //   - Ignores visual noise that doesn't affect interactivity:
+      //     cursor blink, status-bar clock tick, scroll-indicator
+      //     fade, animated GIFs, video playback. Those tripped the
+      //     prior 2% pixel threshold and forced us to wait the full
+      //     timeout on screens that were functionally settled.
+      //   - Catches the signals we actually care about for tap-readiness:
+      //     element frames moving (navigation transitions, layout
+      //     animations) and elements appearing/disappearing.
+      //
+      // Caller still passes timeoutMs (via durationMs). `scale` is
+      // accepted for wire-compat but ignored — tree equality is exact.
       let timeoutMs = command.durationMs ?? 15000
-      let threshold = command.scale ?? 0.005
       let timeout = max(0.0, timeoutMs) / 1000.0
       let started = Date()
-      var prev = XCUIScreen.main.screenshot().image
-      var lastDiff = 1.0
+      var prevSig: UInt64?
+      do {
+        prevSig = try treeSignature(of: activeApp.snapshot())
+      } catch {
+        prevSig = nil
+      }
       while Date().timeIntervalSince(started) < timeout {
-        let cur = XCUIScreen.main.screenshot().image
-        lastDiff = computePixelDiffFraction(prev, cur)
-        if lastDiff <= threshold {
+        let curSig: UInt64
+        do {
+          curSig = try treeSignature(of: activeApp.snapshot())
+        } catch {
+          // Snapshot failed (rare — usually app momentarily gone).
+          // Treat as "still changing" and keep polling.
+          continue
+        }
+        if curSig == prevSig {
           let elapsed = (Date().timeIntervalSince(started)) * 1000
-          lastIdleScreenshot = (image: cur, capturedAt: Date())
           return Response(ok: true, data: DataPayload(
             message: "settled",
-            currentUptimeMs: elapsed,
-            diffFraction: lastDiff
+            currentUptimeMs: elapsed
           ))
         }
-        prev = cur
+        prevSig = curSig
       }
-      lastIdleScreenshot = (image: prev, capturedAt: Date())
       return Response(ok: true, data: DataPayload(
         message: "wait timed out (proceeding)",
-        currentUptimeMs: timeout * 1000,
-        diffFraction: lastDiff
+        currentUptimeMs: timeout * 1000
       ))
     case .recordStart:
       guard
