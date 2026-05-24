@@ -154,12 +154,28 @@ Examples:
 			Name:  "no-flutter-fallback",
 			Usage: "Disable automatic Flutter VM Service fallback",
 		},
+		&cli.StringFlag{
+			Name:  "artifacts",
+			Usage: "When to capture screenshots/hierarchy: on-failure (default), always, never",
+			Value: "on-failure",
+		},
 
 		// Emulator management flags (start-emulator, auto-start-emulator,
 		// shutdown-after, boot-timeout) are global flags defined in cli.go.
 
 	},
 	Action: runTest,
+}
+
+func parseArtifactMode(s string) executor.ArtifactMode {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "always":
+		return executor.ArtifactAlways
+	case "never":
+		return executor.ArtifactNever
+	default:
+		return executor.ArtifactOnFailure
+	}
 }
 
 // parseDevices parses the --device flag value into a slice of device UDIDs.
@@ -489,6 +505,9 @@ type RunConfig struct {
 	// Flutter
 	NoFlutterFallback bool // Disable automatic Flutter VM Service fallback
 
+	// Artifacts
+	Artifacts executor.ArtifactMode // When to capture screenshots/hierarchy
+
 	// Cloud provider (detected from AppiumURL, nil if not a cloud provider)
 	CloudProvider cloud.Provider
 	CloudMeta     map[string]string
@@ -668,6 +687,7 @@ func runTest(c *cli.Context) error {
 		NoAppInstall:       getBool("no-app-install"),
 		NoDriverInstall:    getBool("no-driver-install"),
 		NoFlutterFallback:  getBool("no-flutter-fallback"),
+		Artifacts:          parseArtifactMode(getString("artifacts")),
 	}
 
 	// Apply waitForIdleTimeout with priority:
@@ -1316,7 +1336,7 @@ func executeSingleDevice(cfg *RunConfig, flows []flow.Flow) (*executor.RunResult
 	runner := executor.New(driver, executor.RunnerConfig{
 		OutputDir:          cfg.OutputDir,
 		Parallelism:        0,
-		Artifacts:          executor.ArtifactOnFailure,
+		Artifacts:          cfg.Artifacts,
 		Device:             deviceInfo,
 		App:                buildAppReport(driver),
 		RunnerVersion:      Version,
@@ -1357,7 +1377,7 @@ func ExecuteFlowWithDriver(driver core.Driver, cfg *RunConfig, f flow.Flow) (*ex
 	runner := executor.New(driver, executor.RunnerConfig{
 		OutputDir:          cfg.OutputDir,
 		Parallelism:        0,
-		Artifacts:          executor.ArtifactOnFailure,
+		Artifacts:          cfg.Artifacts,
 		Device:             deviceInfo,
 		App:                buildAppReport(driver),
 		RunnerVersion:      Version,
@@ -1675,7 +1695,7 @@ func executeAppiumSingleSession(cfg *RunConfig, flows []flow.Flow) (*executor.Ru
 	runner := executor.New(driver, executor.RunnerConfig{
 		OutputDir:          cfg.OutputDir,
 		Parallelism:        0,
-		Artifacts:          executor.ArtifactOnFailure,
+		Artifacts:          cfg.Artifacts,
 		Device:             deviceInfo,
 		App:                buildAppReport(driver),
 		RunnerVersion:      Version,
@@ -2442,7 +2462,7 @@ func createParallelRunner(cfg *RunConfig, workers []executor.DeviceWorker, platf
 	runnerConfig := executor.RunnerConfig{
 		OutputDir:          cfg.OutputDir,
 		Parallelism:        0,
-		Artifacts:          executor.ArtifactOnFailure,
+		Artifacts:          cfg.Artifacts,
 		Device:             deviceInfo,
 		App:                buildAppReport(firstDriver),
 		RunnerVersion:      Version,

@@ -83,6 +83,23 @@ func TestResolveOutputDir_FlattenWithoutOutput(t *testing.T) {
 	}
 }
 
+func TestParseArtifactMode(t *testing.T) {
+	cases := map[string]executor.ArtifactMode{
+		"always":           executor.ArtifactAlways,
+		"ALWAYS":           executor.ArtifactAlways,
+		"  always  ":       executor.ArtifactAlways,
+		"never":            executor.ArtifactNever,
+		"on-failure":       executor.ArtifactOnFailure,
+		"":                 executor.ArtifactOnFailure,
+		"garbage":          executor.ArtifactOnFailure,
+	}
+	for in, want := range cases {
+		if got := parseArtifactMode(in); got != want {
+			t.Errorf("parseArtifactMode(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
 func TestParseEnvVars_Valid(t *testing.T) {
 	envs := []string{"USER=test", "PASS=secret", "EMPTY="}
 	result := parseEnvVars(envs)
