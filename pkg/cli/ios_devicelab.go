@@ -67,6 +67,7 @@ func createDevicelabIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 
 	printSetupStep("Starting devicelab iOS runner...")
 	logger.Info("Launching devicelab-ios-runner from %s on simulator %s", artifactsDir, udid)
+	logger.Info("Runner log: %s", filepath.Join(artifactsDir, "logs", "runner.log"))
 
 	client, runner, err := dliosdriver.Setup(ctx, dliosdriver.SetupOptions{
 		ArtifactsDir:  artifactsDir,

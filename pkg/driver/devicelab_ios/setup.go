@@ -92,11 +92,31 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 	if opts.HostBundleID == "" {
 		opts.HostBundleID = "dev.devicelab.runner"
 	}
-	if opts.Stdout == nil {
-		opts.Stdout = os.Stderr
-	}
-	if opts.Stderr == nil {
-		opts.Stderr = os.Stderr
+	// Default: route xcodebuild output to a per-build log file so the
+	// runner's `t = X.Xs Find the Window…` chatter doesn't drown the
+	// user's console. Callers can override via opts.Stdout/Stderr if
+	// they want to see it inline (e.g. debugging).
+	if opts.Stdout == nil || opts.Stderr == nil {
+		logsDir := filepath.Join(opts.ArtifactsDir, "logs")
+		_ = os.MkdirAll(logsDir, 0o755)
+		logPath := filepath.Join(logsDir, "runner.log")
+		logFile, err := os.Create(logPath)
+		if err != nil {
+			// Fall back to stderr — better some output than blocking startup.
+			if opts.Stdout == nil {
+				opts.Stdout = os.Stderr
+			}
+			if opts.Stderr == nil {
+				opts.Stderr = os.Stderr
+			}
+		} else {
+			if opts.Stdout == nil {
+				opts.Stdout = logFile
+			}
+			if opts.Stderr == nil {
+				opts.Stderr = logFile
+			}
+		}
 	}
 	if opts.ReadyTimeout == 0 {
 		opts.ReadyTimeout = 60 * time.Second
