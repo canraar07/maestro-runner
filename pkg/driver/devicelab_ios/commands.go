@@ -148,6 +148,7 @@ func (d *Driver) handleTapOn(s *flow.TapOnStep) *core.CommandResult {
 			d.lastTappedIdentifier = hit.Identifier
 			d.lastTappedX, d.lastTappedY = hit.X, hit.Y
 			d.lastTapHasCoords = true
+			d.settlePostTap()
 			return core.SuccessResult(fmt.Sprintf("tapped: %s", describeSelector(s.Selector)), nil)
 		}
 		// Fall through to snapshot path on miss/error.
@@ -183,7 +184,34 @@ func (d *Driver) handleTapOn(s *flow.TapOnStep) *core.CommandResult {
 	}
 	d.lastTappedX, d.lastTappedY = cx, cy
 	d.lastTapHasCoords = true
+	d.settlePostTap()
 	return core.SuccessResult("tapped", toElementInfo(node))
+}
+
+// settlePostTap waits briefly for the screen to stabilise after a tap.
+// React Navigation drops follow-up taps that arrive mid screen-pop
+// animation: the next element's frame is settled (so our pre-tap
+// settle-wait passes), but the gesture system isn't ready yet, so the
+// next tap silently no-ops (we saw this on Stack - Prevent Remove's
+// final Pop to top → assertVisible "Push Article" sequence).
+//
+// Capped at 400ms (most React Navigation transitions complete in
+// <300ms on iOS sim). Threshold 2% (not 0.5%): the stricter default
+// rejects subtle background motion — status bar clock, scroll
+// indicator decay, cursor blink — and forces us to wait the full
+// budget even when the screen is functionally settled. 2% trips on
+// real navigation animation while ignoring noise.
+func (d *Driver) settlePostTap() {
+	timeoutMs := 400.0
+	threshold := 0.02
+	ctx, cancel := context.WithTimeout(d.parentContext(), time.Duration(timeoutMs+1500)*time.Millisecond)
+	defer cancel()
+	_, _ = d.client.Call(ctx, Command{
+		Command:     CmdAwaitIdle,
+		AppBundleID: d.appID,
+		DurationMs:  &timeoutMs,
+		Scale:       &threshold,
+	})
 }
 
 // handleInputText routes text through the runner's `type` command. When the
