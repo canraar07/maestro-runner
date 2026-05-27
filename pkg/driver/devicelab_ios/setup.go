@@ -80,9 +80,29 @@ func (h *RunnerHandle) Stop() error {
 	return nil
 }
 
+// maxStartupAttempts caps the retry loop in Setup. On CI macos-latest
+// xcodebuild test-without-building intermittently hangs after launch —
+// emits a few "[MT] IDERunDestination" lines then never opens the
+// runner's HTTP listener. Killing it and retrying clears the hang ~80%
+// of the time, so 4 attempts (1 initial + 3 retries) reduces the
+// effective startup-fail rate from the ~20% per-attempt baseline to
+// (0.2)^4 ≈ 0.16% in theory. Each failed attempt waits the stall
+// detection window (60s) before giving up, so 4 attempts caps the
+// total startup cost at roughly 4 minutes worst case.
+const maxStartupAttempts = 4
+
+// stallDetectWindow is how long awaitReady waits with no new log output
+// before declaring xcodebuild stalled. 60s is well past the normal
+// startup chatter — a healthy run emits new log lines every few seconds
+// (test discovery, XCTest framework init, our XCTest output) — but well
+// under the 5-minute ReadyTimeout so we fail fast on real hangs.
+const stallDetectWindow = 60 * time.Second
+
 // Setup launches the runner on the simulator. Returns a Client wired to
 // the chosen port and a Handle for shutdown. On error, any partial state
-// is rolled back.
+// is rolled back. Wraps a per-attempt startOnce in a retry loop that
+// detects xcodebuild stalls (no log output for stallDetectWindow) and
+// kills + retries up to maxStartupAttempts times.
 func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, error) {
 	if opts.ArtifactsDir == "" {
 		return nil, nil, errors.New("ArtifactsDir is required")
@@ -93,14 +113,18 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 	if opts.HostBundleID == "" {
 		opts.HostBundleID = "dev.devicelab.runner"
 	}
-	// Default: route xcodebuild output to a per-build log file so the
-	// runner's `t = X.Xs Find the Window…` chatter doesn't drown the
-	// user's console. Callers can override via opts.Stdout/Stderr if
-	// they want to see it inline (e.g. debugging).
+
+	// Route xcodebuild output to a per-build log file so the runner's
+	// `t = X.Xs Find the Window…` chatter doesn't drown the user's
+	// console, AND so the retry loop can monitor the log file for
+	// stall detection. Callers can override via opts.Stdout/Stderr
+	// if they want it inline (e.g. for debugging) — in that case we
+	// skip stall detection (caller's writers aren't easily monitorable).
+	var logPath string
 	if opts.Stdout == nil || opts.Stderr == nil {
 		logsDir := filepath.Join(opts.ArtifactsDir, "logs")
 		_ = os.MkdirAll(logsDir, 0o755)
-		logPath := filepath.Join(logsDir, "runner.log")
+		logPath = filepath.Join(logsDir, "runner.log")
 		logFile, err := os.Create(logPath)
 		if err != nil {
 			// Fall back to stderr — better some output than blocking startup.
@@ -110,6 +134,7 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 			if opts.Stderr == nil {
 				opts.Stderr = os.Stderr
 			}
+			logPath = ""
 		} else {
 			if opts.Stdout == nil {
 				opts.Stdout = logFile
@@ -120,16 +145,7 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 		}
 	}
 	if opts.ReadyTimeout == 0 {
-		opts.ReadyTimeout = 60 * time.Second
-	}
-
-	port := opts.Port
-	if port == 0 {
-		var err error
-		port, err = pickEphemeralPort()
-		if err != nil {
-			return nil, nil, fmt.Errorf("pick port: %w", err)
-		}
+		opts.ReadyTimeout = 300 * time.Second
 	}
 
 	xctestrun, err := findXctestrun(opts.ArtifactsDir)
@@ -142,6 +158,52 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 		return nil, nil, fmt.Errorf("install host app: %w", err)
 	}
 
+	var lastErr error
+	for attempt := 1; attempt <= maxStartupAttempts; attempt++ {
+		if attempt > 1 {
+			// User-visible + log retry banner.
+			banner := fmt.Sprintf(
+				"  ⚠ devicelab runner stalled on attempt %d/%d: %v",
+				attempt-1, maxStartupAttempts, lastErr,
+			)
+			fmt.Fprintln(os.Stderr, banner)
+			fmt.Fprintln(os.Stderr, fmt.Sprintf("  ↻ Retrying (attempt %d/%d)...", attempt, maxStartupAttempts))
+			// Mirror into the runner log so the artifact captures the full
+			// retry history (logFile may be closed if we hit the fallback
+			// branch above; guard before writing).
+			if opts.Stdout != os.Stderr {
+				fmt.Fprintln(opts.Stdout, banner)
+				fmt.Fprintln(opts.Stdout, fmt.Sprintf("=== attempt %d/%d ===", attempt, maxStartupAttempts))
+			}
+		}
+
+		client, handle, err := startOnce(ctx, opts, xctestrun, logPath)
+		if err == nil {
+			if attempt > 1 {
+				fmt.Fprintln(os.Stderr, fmt.Sprintf("  ✓ Runner started on attempt %d/%d", attempt, maxStartupAttempts))
+			}
+			return client, handle, nil
+		}
+		lastErr = err
+	}
+	return nil, nil, fmt.Errorf(
+		"runner not ready after %d attempts: %w",
+		maxStartupAttempts, lastErr,
+	)
+}
+
+// startOnce performs one attempt at launching xcodebuild + waiting for
+// the runner's HTTP listener. On stall (no log output for
+// stallDetectWindow) it kills xcodebuild and returns an error tagged
+// for retry. On other errors it also kills + returns. Caller (Setup)
+// owns the retry decision.
+func startOnce(ctx context.Context, opts SetupOptions, xctestrun, logPath string) (*Client, *RunnerHandle, error) {
+	// Fresh port per attempt — the previous attempt's killed XCTest may
+	// still hold the old port in TIME_WAIT on the simulator side.
+	port, err := pickEphemeralPort()
+	if err != nil {
+		return nil, nil, fmt.Errorf("pick port: %w", err)
+	}
 	if err := injectPortIntoXctestrun(xctestrun, port); err != nil {
 		return nil, nil, fmt.Errorf("inject port: %w", err)
 	}
@@ -173,9 +235,9 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 	handle := &RunnerHandle{cmd: cmd, port: port, host: "127.0.0.1"}
 	client := NewClient(handle.host, port)
 
-	if err := awaitReady(ctx, client, opts.ReadyTimeout); err != nil {
+	if err := awaitReady(ctx, client, opts.ReadyTimeout, logPath); err != nil {
 		_ = handle.Stop()
-		return nil, nil, fmt.Errorf("runner not ready: %w", err)
+		return nil, nil, err
 	}
 
 	// Pre-warm XCTest's accessibility framework + screenshot path so the
@@ -244,11 +306,22 @@ func simctlInstall(ctx context.Context, udid, appPath string) error {
 // deadline passes. Backoff is short (200ms) since the runner usually comes
 // up within 10-15s of cold start. agent-device's transport doesn't expose
 // a separate /health endpoint, so we use the lightest real command.
-func awaitReady(parent context.Context, c *Client, timeout time.Duration) error {
+//
+// In parallel it watches the runner.log file for stall detection. xcodebuild
+// emits steady output during a healthy startup (test discovery, framework
+// init, our XCTest output). When it hangs the log goes silent. If we see
+// no log growth for stallDetectWindow, return errStalled — the caller (Setup)
+// kills xcodebuild and retries. Passing logPath="" disables stall detection
+// (used when callers route output to their own writers).
+func awaitReady(parent context.Context, c *Client, timeout time.Duration, logPath string) error {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	deadline := time.Now().Add(timeout)
+	stallCheckEnabled := logPath != ""
+	var lastLogSize int64 = -1
+	lastLogActivity := time.Now()
+
 	for {
 		probeCtx, probeCancel := context.WithTimeout(ctx, 2*time.Second)
 		err := c.Ping(probeCtx)
@@ -256,6 +329,25 @@ func awaitReady(parent context.Context, c *Client, timeout time.Duration) error 
 		if err == nil {
 			return nil
 		}
+
+		// Stall detection: if the log file isn't growing, xcodebuild is
+		// hung (most commonly waiting on something Xcode 26 + iOS 26 sim
+		// doesn't resolve). Bail early so the caller can kill + retry
+		// instead of waiting the full ReadyTimeout.
+		if stallCheckEnabled {
+			if fi, statErr := os.Stat(logPath); statErr == nil {
+				if fi.Size() != lastLogSize {
+					lastLogSize = fi.Size()
+					lastLogActivity = time.Now()
+				} else if time.Since(lastLogActivity) > stallDetectWindow {
+					return fmt.Errorf(
+						"xcodebuild stalled (no log output for %v; log: %s)",
+						stallDetectWindow.Round(time.Second), logPath,
+					)
+				}
+			}
+		}
+
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout after %s: last error: %v", timeout, err)
 		}
