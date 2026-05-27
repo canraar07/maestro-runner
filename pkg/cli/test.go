@@ -154,6 +154,10 @@ Examples:
 			Name:  "no-flutter-fallback",
 			Usage: "Disable automatic Flutter VM Service fallback",
 		},
+		&cli.BoolFlag{
+			Name:  "android-tcp-forward",
+			Usage: "Force TCP-to-TCP adb forward for Android drivers (auto-enabled when $DEVICEFARM_DEVICE_UDID is set; needed on AWS Device Farm and similar sandboxes that block localfilesystem:/localabstract: forwards)",
+		},
 		&cli.StringFlag{
 			Name:  "artifacts",
 			Usage: "When to capture screenshots/hierarchy: on-failure (default), always, never",
@@ -505,6 +509,14 @@ type RunConfig struct {
 	// Flutter
 	NoFlutterFallback bool // Disable automatic Flutter VM Service fallback
 
+	// Android driver — TCP forward override
+	// Forces TCP-to-TCP adb forward instead of the Unix-socket forward
+	// we use on Linux/Mac. Auto-enabled when $DEVICEFARM_DEVICE_UDID is
+	// set (AWS Device Farm). Use the flag to opt in manually for other
+	// sandboxed environments that block localfilesystem:/localabstract:
+	// forwards.
+	AndroidTCPForward bool
+
 	// Artifacts
 	Artifacts executor.ArtifactMode // When to capture screenshots/hierarchy
 
@@ -687,6 +699,7 @@ func runTest(c *cli.Context) error {
 		NoAppInstall:       getBool("no-app-install"),
 		NoDriverInstall:    getBool("no-driver-install"),
 		NoFlutterFallback:  getBool("no-flutter-fallback"),
+		AndroidTCPForward:  getBool("android-tcp-forward"),
 		Artifacts:          parseArtifactMode(getString("artifacts")),
 	}
 

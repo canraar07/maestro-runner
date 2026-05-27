@@ -22,9 +22,16 @@ const (
 // DeviceLabDriverConfig holds configuration for the DeviceLab Android Driver.
 type DeviceLabDriverConfig struct {
 	SocketPath string        // Unix socket path (Linux/Mac only)
-	LocalPort  int           // TCP port (Windows only)
+	LocalPort  int           // TCP port (Windows or TCPForward)
 	DevicePort int           // Port on device (default: 6791)
 	Timeout    time.Duration // Startup timeout (default: 30s)
+	// TCPForward forces TCP-to-TCP forwarding (adb forward tcp:N tcp:M)
+	// instead of the default Linux/Mac unix-socket forward. Required on
+	// sandboxed environments like AWS Device Farm whose adb-proxy blocks
+	// localfilesystem:/localabstract: forwards but allows plain tcp:.
+	// Windows always uses TCP regardless of this flag. Auto-set from
+	// $DEVICEFARM_DEVICE_UDID in the CLI layer.
+	TCPForward bool
 }
 
 // DefaultDeviceLabDriverConfig returns default configuration.
@@ -60,8 +67,9 @@ func (d *AndroidDevice) StartDeviceLabDriver(cfg DeviceLabDriverConfig) error {
 		logger.Warn("failed to stop existing DeviceLab Android Driver instance: %v", err)
 	}
 
-	// Set up forwarding based on OS
-	if runtime.GOOS == "windows" {
+	// Set up forwarding. TCP path is mandatory on Windows and used on
+	// Unix when cfg.TCPForward is set (e.g. AWS Device Farm — see #83).
+	if runtime.GOOS == "windows" || cfg.TCPForward {
 		if err := d.setupDeviceLabTCPForward(cfg); err != nil {
 			return err
 		}
