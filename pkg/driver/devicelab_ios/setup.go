@@ -145,7 +145,7 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 		}
 	}
 	if opts.ReadyTimeout == 0 {
-		opts.ReadyTimeout = 300 * time.Second
+		opts.ReadyTimeout = 600 * time.Second
 	}
 
 	xctestrun, err := findXctestrun(opts.ArtifactsDir)
@@ -174,6 +174,18 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 			if opts.Stdout != os.Stderr {
 				fmt.Fprintln(opts.Stdout, banner)
 				fmt.Fprintln(opts.Stdout, fmt.Sprintf("=== attempt %d/%d ===", attempt, maxStartupAttempts))
+			}
+			// Reset the simulator before retrying. Killing xcodebuild
+			// alone doesn't unwedge a stuck CoreSimulator daemon — if
+			// the sim itself is in a bad state, every xcodebuild retry
+			// hits the same wall. A shutdown+boot cycle on the same
+			// UDID clears CoreSimulator process state without losing
+			// installed apps (those live in the sim's data container).
+			if rerr := resetSimulator(ctx, opts.SimulatorUDID, opts.Stdout); rerr != nil {
+				// Best-effort: log and continue. If reset fails the
+				// retry attempt will reveal whether the sim is still
+				// usable.
+				fmt.Fprintln(os.Stderr, fmt.Sprintf("  ⚠ simctl reset failed: %v (continuing anyway)", rerr))
 			}
 		}
 
@@ -286,6 +298,44 @@ func injectPortIntoXctestrun(path string, port int) error {
 	if out, err := set.CombinedOutput(); err != nil {
 		return fmt.Errorf("PlistBuddy set: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
+	return nil
+}
+
+// resetSimulator shuts down then boots the given simulator. Used between
+// retry attempts when xcodebuild stalls — a sim-daemon stuck in a bad
+// state survives a plain xcodebuild kill, but a shutdown+boot cycle
+// resets it without losing installed apps (those live in the data
+// container, not the sim runtime state).
+//
+// Best-effort: returns an error if either step fails but doesn't fight
+// the caller — the next startup attempt will reveal whether the sim is
+// usable again.
+func resetSimulator(ctx context.Context, udid string, logOut io.Writer) error {
+	if logOut != nil {
+		fmt.Fprintln(logOut, fmt.Sprintf("  ⟳ Resetting simulator %s...", udid))
+	}
+	shutdownCmd := exec.CommandContext(ctx, "xcrun", "simctl", "shutdown", udid)
+	if out, err := shutdownCmd.CombinedOutput(); err != nil {
+		msg := strings.ToLower(strings.TrimSpace(string(out)))
+		// "current state shutdown" / "unable to lookup in current state:
+		// shutdown" is fine — already off, nothing to do.
+		if !strings.Contains(msg, "shutdown") && !strings.Contains(msg, "current state:") {
+			return fmt.Errorf("simctl shutdown: %w (%s)", err, msg)
+		}
+	}
+	bootCmd := exec.CommandContext(ctx, "xcrun", "simctl", "boot", udid)
+	if out, err := bootCmd.CombinedOutput(); err != nil {
+		msg := strings.ToLower(strings.TrimSpace(string(out)))
+		// "Booted" / "current state: booted" is fine — already on.
+		if !strings.Contains(msg, "booted") && !strings.Contains(msg, "current state:") {
+			return fmt.Errorf("simctl boot: %w (%s)", err, msg)
+		}
+	}
+	// Wait for the sim to be fully ready. `bootstatus -b` blocks until
+	// boot completes. Cap at 60s — a healthy sim boots in 5-15s.
+	bootCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(bootCtx, "xcrun", "simctl", "bootstatus", udid, "-b").Run()
 	return nil
 }
 

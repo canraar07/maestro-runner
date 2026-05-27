@@ -30,10 +30,11 @@ const (
 	// consumes ~75 seconds before XCTest even prints "Running tests..."
 	// (vs ~10s on a fast local Mac). At 90s the budget left for WDA's
 	// own startup was only ~15s — too tight, flaked ~67% of soak runs.
-	// 300s gives enough headroom for the slowest CI path without making
-	// the fast local path noticeably slower (it succeeds well before
-	// timeout regardless).
-	startupTimeout = 300 * time.Second
+	// Bumped to 600s to match upstream maestro's
+	// MAESTRO_DRIVER_STARTUP_TIMEOUT — sized for the slowest CI path
+	// we've seen (>250s under load). Local runs see "ServerURLHere->"
+	// in <30s so they pay nothing for the larger budget.
+	startupTimeout = 600 * time.Second
 	// maxStartupAttempts caps the retry loop in Start. On CI macos-latest
 	// xcodebuild test-without-building intermittently hangs after launch —
 	// emits a few "[MT] IDERunDestination" lines then never opens WDA's
@@ -209,6 +210,18 @@ func (r *Runner) Start(ctx context.Context) error {
 				fmt.Fprintln(f, banner)
 				fmt.Fprintln(f, fmt.Sprintf("=== attempt %d/%d ===", attempt, maxStartupAttempts))
 				_ = f.Close()
+			}
+			// Reset the simulator before retrying. Killing xcodebuild alone
+			// doesn't unwedge a stuck CoreSimulator daemon — if the sim is
+			// in a bad state every xcodebuild retry hits the same wall.
+			// shutdown+boot on the same UDID clears CoreSimulator without
+			// losing installed apps. Sim-only — physical devices don't
+			// have a simctl equivalent (and don't suffer this CI-runner
+			// wedge pattern anyway).
+			if r.isSimulatorCache {
+				if rerr := resetSimulator(ctx, r.deviceUDID); rerr != nil {
+					fmt.Fprintln(os.Stderr, fmt.Sprintf("  ⚠ simctl reset failed: %v (continuing anyway)", rerr))
+				}
 			}
 		}
 
@@ -437,6 +450,34 @@ func (r *Runner) getBuildCacheDir() (string, error) {
 
 	cacheDir := filepath.Join(config.GetCacheDir(), "wda-builds", configName)
 	return cacheDir, nil
+}
+
+// resetSimulator shuts down then boots the given simulator. Used between
+// retry attempts when xcodebuild stalls — a sim-daemon stuck in a bad
+// state survives a plain xcodebuild kill, but a shutdown+boot cycle
+// resets it without losing installed apps.
+func resetSimulator(ctx context.Context, udid string) error {
+	shutdownCmd := exec.CommandContext(ctx, "xcrun", "simctl", "shutdown", udid)
+	if out, err := shutdownCmd.CombinedOutput(); err != nil {
+		msg := strings.ToLower(strings.TrimSpace(string(out)))
+		// Already shut down → fine.
+		if !strings.Contains(msg, "shutdown") && !strings.Contains(msg, "current state:") {
+			return fmt.Errorf("simctl shutdown: %w (%s)", err, msg)
+		}
+	}
+	bootCmd := exec.CommandContext(ctx, "xcrun", "simctl", "boot", udid)
+	if out, err := bootCmd.CombinedOutput(); err != nil {
+		msg := strings.ToLower(strings.TrimSpace(string(out)))
+		// Already booted → fine.
+		if !strings.Contains(msg, "booted") && !strings.Contains(msg, "current state:") {
+			return fmt.Errorf("simctl boot: %w (%s)", err, msg)
+		}
+	}
+	// Block until boot completes; cap at 60s. Healthy sim boots in 5-15s.
+	bootCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(bootCtx, "xcrun", "simctl", "bootstatus", udid, "-b").Run()
+	return nil
 }
 
 // isSimulator checks if the device is a simulator.
