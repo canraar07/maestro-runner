@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -145,7 +146,16 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 		return nil, nil, fmt.Errorf("inject port: %w", err)
 	}
 
-	destination := fmt.Sprintf("platform=iOS Simulator,id=%s", opts.SimulatorUDID)
+	// Pin arch in the destination string. On Xcode 26 + iOS 26 simulators,
+	// xcodebuild's destination resolver returns BOTH arm64 and x86_64
+	// entries for the same UDID and warns "Using the first of multiple
+	// matching destinations". When the resolver picks ambiguously it can
+	// hang for minutes — observed as ~40% startup-fail rate on CI before
+	// this pin (same root cause as the WDA fix in 822a511).
+	destination := fmt.Sprintf(
+		"platform=iOS Simulator,arch=%s,id=%s",
+		runtime.GOARCH, opts.SimulatorUDID,
+	)
 	cmd := exec.Command(
 		"xcodebuild",
 		"test-without-building",
