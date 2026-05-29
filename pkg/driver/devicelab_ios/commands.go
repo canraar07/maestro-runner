@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,6 +70,8 @@ func (d *Driver) executeStep(step flow.Step) *core.CommandResult {
 		return d.handleLongPress(s)
 	case *flow.OpenLinkStep:
 		return d.handleOpenLink(s)
+	case *flow.SetLocationStep:
+		return d.handleSetLocation(s)
 	default:
 		return core.ErrorResult(
 			fmt.Errorf("step %T not implemented in devicelab_ios driver yet", step),
@@ -585,6 +588,54 @@ func (d *Driver) handleOpenLink(s *flow.OpenLinkStep) *core.CommandResult {
 		time.Sleep(2 * time.Second)
 	}
 	return core.SuccessResult(fmt.Sprintf("opened link: %s", s.Link), nil)
+}
+
+// handleSetLocation sets the simulator's GPS location via `xcrun simctl
+// location <udid> set <lat>,<lon>` — same mechanism Maestro uses
+// (LocalSimulatorUtils.kt) and the parallel WDA driver in this repo.
+//
+// Real-device path: Apple's public tooling (devicectl / instruments / WDA)
+// doesn't expose a way to override GPS on a real iPhone, so there is no
+// supported way to do this. Returns an explicit error rather than silently
+// no-op'ing — Maestro's own real-device implementation is a `TODO` stub
+// for the same reason. App-level mocking is the practical workaround.
+func (d *Driver) handleSetLocation(s *flow.SetLocationStep) *core.CommandResult {
+	if s.Latitude == "" || s.Longitude == "" {
+		return core.ErrorResult(
+			fmt.Errorf("latitude and longitude required"),
+			"setLocation requires both latitude and longitude",
+		)
+	}
+	lat, err := strconv.ParseFloat(s.Latitude, 64)
+	if err != nil {
+		return core.ErrorResult(err, fmt.Sprintf("Invalid latitude: %s", s.Latitude))
+	}
+	lon, err := strconv.ParseFloat(s.Longitude, 64)
+	if err != nil {
+		return core.ErrorResult(err, fmt.Sprintf("Invalid longitude: %s", s.Longitude))
+	}
+	if d.info == nil || !d.info.IsSimulator {
+		return core.ErrorResult(
+			fmt.Errorf("setLocation not supported on iOS real devices"),
+			"setLocation isn't supported on iOS real devices: Apple's public tooling "+
+				"(devicectl / instruments / WDA) doesn't expose a way to override GPS on "+
+				"a real device. Run the flow on an iOS simulator, or mock location at the app level.",
+		)
+	}
+	if d.udid == "" {
+		return core.ErrorResult(
+			fmt.Errorf("device UDID not configured"),
+			"setLocation requires a simulator UDID",
+		)
+	}
+	cmd := exec.Command("xcrun", "simctl", "location", d.udid, "set", fmt.Sprintf("%f,%f", lat, lon))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return core.ErrorResult(
+			fmt.Errorf("simctl location: %w: %s", err, strings.TrimSpace(string(out))),
+			"Failed to set simulator location",
+		)
+	}
+	return core.SuccessResult(fmt.Sprintf("Location set to (%f, %f) on simulator %s", lat, lon, d.udid), nil)
 }
 
 func (d *Driver) handleLongPress(s *flow.LongPressOnStep) *core.CommandResult {
