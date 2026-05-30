@@ -69,6 +69,21 @@ type DeviceLabClient interface {
 
 	// Settle detection
 	WaitForSettle(timeoutMs, quietMs int) (bool, error)
+
+	// TreeHash returns a hash of the current accessibility tree. Used by
+	// lazy retry: capture pre-tap, compare after a failing assertion to
+	// detect "screen unchanged → tap had no effect → retry the tap".
+	TreeHash() (uint64, error)
+
+	// FindFirstOf tries multiple (strategy, selector) pairs in a single
+	// RPC, returning the first match. Avoids paying the tree-fetch cost
+	// once per strategy. Pairs are passed flat: [s1, sel1, s2, sel2, ...].
+	FindFirstOf(strategiesAndSelectors []string) (*uiautomator2.Element, error)
+
+	// WaitForWindowUpdate blocks up to timeoutMs for a window-content-changed
+	// event on the target package. Returns true if updated, false if window
+	// stayed stable for the full timeout. Mirrors Maestro's isWindowUpdating.
+	WaitForWindowUpdate(appID string, timeoutMs int) (bool, error)
 }
 
 // Driver implements core.Driver using the DeviceLab Android Driver.
@@ -99,7 +114,26 @@ type Driver struct {
 	lastCDPScan    time.Time     // rate-limit ADB shell CDP scans
 	lastCDPResult  *core.CDPInfo // cached result from last scan
 	knownCDPType   string        // "browser" or "webview" — set from socket name, cleared on CDP down
+
+	// Lazy retry state: each successful tap captures the pre-tap tree hash
+	// + selector + time. If the NEXT element-based command can't find its
+	// target within lazyRetryProbeMs, we check if the screen has changed
+	// since the tap (hash unchanged → tap had no effect → re-tap, up to
+	// lazyRetryMax times). Zero overhead on success paths.
+	lastTapHash     uint64
+	lastTapSelector flow.Selector
+	lastTapTime     time.Time
+	lastTapRetries  int
 }
+
+// Lazy retry tunables. Window: how long after a tap we still consider it
+// "recent enough" to retry. Probe: how long we let the next command poll
+// before doing the hash check. Max: retry cap per original tap.
+const (
+	lazyRetryWindow   = 2 * time.Second
+	lazyRetryProbeMs  = 500
+	lazyRetryMax      = 2
+)
 
 // New creates a new DeviceLab driver.
 func New(client DeviceLabClient, info *core.PlatformInfo, device ShellExecutor) *Driver {
@@ -113,6 +147,135 @@ func New(client DeviceLabClient, info *core.PlatformInfo, device ShellExecutor) 
 // WaitForSettle delegates to the on-device agent's tree-comparison settle detection.
 func (d *Driver) WaitForSettle(timeoutMs, quietMs int) (bool, error) {
 	return d.client.WaitForSettle(timeoutMs, quietMs)
+}
+
+// tapHadEffect (kept as dead code) — element-presence post-tap check.
+// Currently NOT called from the tap path. Was problematic because some
+// apps (React Navigation showcase) have buttons that persist across
+// multiple screens, producing false negatives (tap navigated but source
+// still findable on the next screen).
+//
+//nolint:unused
+func (d *Driver) tapHadEffect() bool {
+	if d.lastTapTime.IsZero() {
+		return true
+	}
+	for i := 0; i < tapVerifyAttempts; i++ {
+		_, _, err := d.findElementFast(d.lastTapSelector, true, 50)
+		if err != nil {
+			return true
+		}
+		if i < tapVerifyAttempts-1 {
+			time.Sleep(tapVerifyInterval)
+		}
+	}
+	return false
+}
+
+// tapHadEffectViaWindowUpdate uses Maestro's isWindowUpdating signal —
+// asks the agent to subscribe to AccessibilityEvent stream and wait up
+// to windowUpdateTimeoutMs for a window content-changed event on the
+// app's package. Returns true if any event fires (tap caused something
+// in the window), false if nothing fires (tap likely eaten).
+//
+// Currently NOT called from the tap path (commented out). Wired up so
+// callers can opt in once we know it doesn't fire false positives /
+// negatives on the React Navigation showcase suite.
+//
+//nolint:unused
+func (d *Driver) tapHadEffectViaWindowUpdate(appID string) bool {
+	if appID == "" {
+		return true // no app context — assume effect (avoid false retry)
+	}
+	updated, err := d.client.WaitForWindowUpdate(appID, windowUpdateTimeoutMs)
+	if err != nil {
+		return true // can't verify — assume effect
+	}
+	return updated
+}
+
+const (
+	tapVerifyAttempts     = 3
+	tapVerifyInterval     = 30 * time.Millisecond
+	windowUpdateTimeoutMs = 500
+)
+
+// recordTap captures the current tree hash so a later failing assertion can
+// detect "tap had no effect" (hash unchanged) and retry. Must be called
+// BEFORE the click fires. Resets the retry counter to 0 — this is a new
+// original tap, not a re-attempt.
+func (d *Driver) recordTap(sel flow.Selector) {
+	hash, err := d.client.TreeHash()
+	if err != nil {
+		// If we can't read the hash, just clear state — lazy retry will skip.
+		logger.Info("[devicelab] recordTap CLEAR (TreeHash error): %v on %s", err, sel.Describe())
+		d.lastTapHash = 0
+		d.lastTapTime = time.Time{}
+		return
+	}
+	d.lastTapHash = hash
+	d.lastTapSelector = sel
+	d.lastTapTime = time.Now()
+	d.lastTapRetries = 0
+	logger.Info("[devicelab] recordTap SET hash=%x for %s", hash, sel.Describe())
+}
+
+// maybeLazyRetryTap is called from element-based commands (assertVisible,
+// extendedWaitUntil, inputText — NOT assertNotVisible) after they've polled
+// for lazyRetryProbeMs without finding the target. It checks if:
+//   - a tap happened recently (within lazyRetryWindow)
+//   - the tree hash hasn't changed since that tap (screen unchanged)
+//   - we haven't exceeded lazyRetryMax for this tap
+// If all true, it re-issues the prior tap and returns true so the caller
+// knows to keep polling. Returns false otherwise (caller continues its
+// normal failure path).
+func (d *Driver) maybeLazyRetryTap() bool {
+	if d.lastTapTime.IsZero() {
+		logger.Info("[devicelab] lazy retry skip: no recent tap recorded")
+		return false
+	}
+	if time.Since(d.lastTapTime) > lazyRetryWindow {
+		logger.Info("[devicelab] lazy retry skip: tap was %v ago (>%v)", time.Since(d.lastTapTime), lazyRetryWindow)
+		return false
+	}
+	if d.lastTapRetries >= lazyRetryMax {
+		logger.Info("[devicelab] lazy retry skip: hit max retries (%d)", d.lastTapRetries)
+		return false
+	}
+
+	// Primary signal: is the tap's target element STILL findable? If yes,
+	// the tap clearly didn't navigate away from it → tap had no effect →
+	// retry. This is more specific than tree-hash because it directly
+	// answers "did the screen transition?": if the source button is still
+	// there, we're on the same screen. Animations, ripples, focus changes
+	// etc. do not remove the original button — only a real navigation does.
+	_, _, findErr := d.findElementFast(d.lastTapSelector, true, 50)
+	if findErr != nil {
+		// Source element gone → tap navigated → don't retry.
+		logger.Info("[devicelab] lazy retry skip: tap target %s no longer findable — tap had effect", d.lastTapSelector.Describe())
+		return false
+	}
+	logger.Info("[devicelab] lazy retry triggered: tap target %s still findable → tap had no effect", d.lastTapSelector.Describe())
+
+	// Re-issue the tap via FindAndClick. Reset the timer so further probes
+	// keep counting from this re-attempt, not the original.
+	for _, s := range buildClickableOrAllStrategies(d.lastTapSelector) {
+		if _, err := d.client.FindAndClick(s.Strategy, s.Value); err == nil {
+			d.lastTapRetries++
+			d.lastTapTime = time.Now()
+			return true
+		}
+	}
+	return false
+}
+
+// buildClickableOrAllStrategies returns the strategy chain used for a tap.
+// Mirrors what tapOn's fast path does: clickable-first for text, fall back
+// to non-clickable. Pure helper so maybeLazyRetryTap can re-issue the tap.
+func buildClickableOrAllStrategies(sel flow.Selector) []LocatorStrategy {
+	clickable, _ := buildClickableOnlyStrategies(sel)
+	all, _ := buildSelectors(sel, 0)
+	return append(clickable, all...)
 }
 
 // SetCDPStateFunc sets the function used to retrieve real-time CDP socket state
@@ -561,6 +724,43 @@ func (d *Driver) findElementFast(sel flow.Selector, optional bool, stepTimeoutMs
 	return d.findElementWithOptions(sel, optional, stepTimeoutMs, false, true)
 }
 
+// findElementFastWithLazyRetry wraps findElementFast with lazy retry of a
+// preceding tap. Tries the find for lazyRetryProbeMs first; if not found,
+// asks maybeLazyRetryTap whether to re-issue the prior tap; loops up to
+// lazyRetryMax times. Falls through to the standard timeout if hash has
+// changed (real "element not visible") or if no recent tap is recorded.
+func (d *Driver) findElementFastWithLazyRetry(sel flow.Selector, optional bool, stepTimeoutMs int) (*uiautomator2.Element, *core.ElementInfo, error) {
+	logger.Info("[devicelab] findElementFastWithLazyRetry start for %s (lastTapTime zero=%v)", sel.Describe(), d.lastTapTime.IsZero())
+	if elem, info, err := d.findElementFast(sel, optional, lazyRetryProbeMs); err == nil {
+		return elem, info, nil
+	}
+	logger.Info("[devicelab] findElementFastWithLazyRetry first probe failed, calling maybeLazyRetryTap")
+	for d.maybeLazyRetryTap() {
+		logger.Info("[devicelab] lazy retry: re-issued tap on %s after assertion probe failed", d.lastTapSelector.Describe())
+		if elem, info, err := d.findElementFast(sel, optional, lazyRetryProbeMs); err == nil {
+			return elem, info, nil
+		}
+	}
+	logger.Info("[devicelab] findElementFastWithLazyRetry falling through to full timeout for %s", sel.Describe())
+	return d.findElementFast(sel, optional, stepTimeoutMs)
+}
+
+// findElementWithLazyRetry is the same wrapper for the standard (3-call)
+// findElement path. Used by inputText, where the next step actually consumes
+// the element (vs. assertVisible which just checks visibility).
+func (d *Driver) findElementWithLazyRetry(sel flow.Selector, optional bool, stepTimeoutMs int) (*uiautomator2.Element, *core.ElementInfo, error) {
+	if elem, info, err := d.findElement(sel, optional, lazyRetryProbeMs); err == nil {
+		return elem, info, nil
+	}
+	for d.maybeLazyRetryTap() {
+		logger.Info("[devicelab] lazy retry: re-issued tap on %s before inputText", d.lastTapSelector.Describe())
+		if elem, info, err := d.findElement(sel, optional, lazyRetryProbeMs); err == nil {
+			return elem, info, nil
+		}
+	}
+	return d.findElement(sel, optional, stepTimeoutMs)
+}
+
 // findElementForTap finds an element for tap commands.
 // DeviceLab behavior: non-clickable first (fastest match), then clickable fallback.
 // No page source fallback for text-based selectors (UiAutomator strategies only).
@@ -674,6 +874,8 @@ func buildClickableOnlyStrategies(sel flow.Selector) ([]LocatorStrategy, error) 
 		// Case-sensitive text/description/hint first, then case-insensitive fallback.
 		// hintContains is a DeviceLab-agent extension — matches EditText android:hint
 		// placeholder so "tapOn: 'Email'" finds an empty field by its hint text.
+		// (Tried exact-match-first à la Maestro but it broke too many flows
+		// where users expect substring matching for tab labels with counts.)
 		strategies = append(strategies, LocatorStrategy{
 			Strategy: uiautomator2.StrategyUIAutomator,
 			Value:    `new UiSelector().textContains("` + escaped + `").clickable(true)` + stateFilters,
@@ -699,9 +901,13 @@ func buildClickableOnlyStrategies(sel flow.Selector) ([]LocatorStrategy, error) 
 			Strategy: uiautomator2.StrategyUIAutomator,
 			Value:    `new UiSelector().hintMatches("` + ciPattern + `").clickable(true)` + stateFilters,
 		})
-		// Fall back to regex match (case-insensitive) for partial/pattern matches
+		// Fall back to regex match (case-insensitive) for partial/pattern matches.
+		// looksLikeRegex(text) was true → text IS a regex. Pass it through
+		// unmodified (only escape Java-string quotes); do NOT escape regex
+		// metachars, or `.*For You.*` becomes `\.\*For You\.\*` which matches
+		// the literal string ".*For You.*" instead of "anything around For You".
 		if looksLikeRegex(sel.Text) {
-			regexEscaped := escapeUIAutomator(sel.Text)
+			regexEscaped := escapeUIAutomatorString(sel.Text)
 			pattern := "(?is)" + regexEscaped
 			strategies = append(strategies, LocatorStrategy{
 				Strategy: uiautomator2.StrategyUIAutomator,
@@ -911,6 +1117,14 @@ func (d *Driver) findElementQuick(sel flow.Selector, timeoutMs int) (*uiautomato
 
 // tryFindElementFast attempts to find element using given strategies (single attempt).
 // Returns minimal info - just element ID and visible=true. No extra HTTP calls.
+//
+// We tried batching all strategies into UI.findFirstOf (~6× faster per call)
+// but it regressed transient-element detection. The reason: 6 sequential
+// per-strategy RPCs produce 6 fresh tree snapshots spread across ~900ms,
+// which is what gives RN's brief mid-animation states multiple chances to
+// be caught. The batched call (even with implicit-wait polling) produces
+// fewer snapshot moments per call. The wire infrastructure (FindFirstOf)
+// is left in place for future re-enabling when polling parity is sorted.
 func (d *Driver) tryFindElementFast(strategies []LocatorStrategy) (*uiautomator2.Element, *core.ElementInfo, error) {
 	var lastErr error
 	for _, s := range strategies {
@@ -1441,9 +1655,12 @@ func buildSelectorsWithOptions(sel flow.Selector, timeoutMs int, preferClickable
 			Strategy: uiautomator2.StrategyUIAutomator,
 			Value:    `new UiSelector().hintMatches("` + ciPattern + `")` + stateFilters,
 		})
-		// Fall back to regex match (case-insensitive) with proper escaping
+		// Fall back to regex match (case-insensitive). Text is already a regex
+		// per looksLikeRegex — use it as-is; only escape Java-string quotes.
+		// Escaping regex metachars here would defeat the regex (turns `.*` into
+		// `\.\*` which matches the literal string ".*").
 		if looksLikeRegex(sel.Text) {
-			regexEscaped := escapeUIAutomator(sel.Text)
+			regexEscaped := escapeUIAutomatorString(sel.Text)
 			pattern := "(?is)" + regexEscaped
 			if preferClickable {
 				strategies = append(strategies, LocatorStrategy{

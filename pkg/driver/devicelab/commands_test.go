@@ -62,6 +62,11 @@ func (m *mockDeviceLabClient) ClearAppData(string) error                      { 
 func (m *mockDeviceLabClient) GrantPermissions(string, []string) error        { return nil }
 func (m *mockDeviceLabClient) SetAppiumSettings(map[string]interface{}) error { return nil }
 func (m *mockDeviceLabClient) WaitForSettle(int, int) (bool, error)          { return true, nil }
+func (m *mockDeviceLabClient) TreeHash() (uint64, error)                     { return 0, nil }
+func (m *mockDeviceLabClient) FindFirstOf([]string) (*uiautomator2.Element, error) {
+	return nil, fmt.Errorf("not implemented in mock")
+}
+func (m *mockDeviceLabClient) WaitForWindowUpdate(string, int) (bool, error) { return false, nil }
 
 // Compile-time check
 var _ DeviceLabClient = (*mockDeviceLabClient)(nil)

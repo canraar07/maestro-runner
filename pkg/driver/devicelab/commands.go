@@ -35,10 +35,13 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		return result
 	}
 
-	// For text-based taps, use FindAndClick —
+	// For text- AND id-based taps, use FindAndClick —
 	// single atomic Java call: find node + coordinate click at center.
-	// No stale nodes, no performAction, no parent walk-up.
-	if step.Selector.Text != "" && step.Point == "" && !step.Selector.HasRelativeSelector() {
+	// No stale nodes, no performAction, no parent walk-up. Routing id
+	// selectors through this path gives them the same tree-signature
+	// settle that text selectors get (agent's findAndClick → findElement
+	// with settle=true), so id taps don't fire mid-animation.
+	if (step.Selector.Text != "" || step.Selector.ID != "") && step.Point == "" && !step.Selector.HasRelativeSelector() {
 		// Browser mode: find via CDP and click via CDP
 		if d.isBrowserMode() {
 			return d.tapOnBrowser(step)
@@ -75,6 +78,10 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 				}
 
 				for _, s := range strategies {
+					// Capture the pre-tap tree hash so a later failing
+					// assertion can detect "tap had no effect" and retry.
+					d.recordTap(step.Selector)
+
 					elem, err := d.client.FindAndClick(s.Strategy, s.Value)
 					if err == nil {
 						info := &core.ElementInfo{
@@ -87,6 +94,21 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 						if rect, err := elem.Rect(); err == nil {
 							info.Bounds = core.Bounds{X: rect.X, Y: rect.Y, Width: rect.Width, Height: rect.Height}
 						}
+						logger.Info("[devicelab] FindAndClick hit for %s via %s=%s: bounds=[%d,%d][%d,%d] (w=%d h=%d) center=(%d,%d)",
+							step.Selector.Describe(), s.Strategy, s.Value,
+							info.Bounds.X, info.Bounds.Y,
+							info.Bounds.X+info.Bounds.Width, info.Bounds.Y+info.Bounds.Height,
+							info.Bounds.Width, info.Bounds.Height,
+							info.Bounds.X+info.Bounds.Width/2, info.Bounds.Y+info.Bounds.Height/2)
+
+						// Post-tap verification candidates (all wired but
+						// NOT called — empirically none reliably distinguish
+						// "tap had effect" from "tap fired ripple only" on
+						// the React Navigation showcase app):
+						//   d.tapHadEffectViaWindowUpdate("")  // Maestro's isWindowUpdating
+						//   d.tapHadEffect()                   // element-presence check
+						// Both produce false positives (ripples count) and
+						// false negatives (buttons persist across screens).
 						return successResult("Tapped on element", info)
 					}
 					lastErr = err
@@ -107,6 +129,12 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 	if info == nil {
 		return errorResult(fmt.Errorf("nil element info"), "Element info is nil")
 	}
+
+	logger.Info("[devicelab] tap target for %s: bounds=[%d,%d][%d,%d] (w=%d h=%d)",
+		step.Selector.Describe(),
+		info.Bounds.X, info.Bounds.Y,
+		info.Bounds.X+info.Bounds.Width, info.Bounds.Y+info.Bounds.Height,
+		info.Bounds.Width, info.Bounds.Height)
 
 	// If Point is specified WITH selector, tap at relative position within element bounds
 	if step.Point != "" && info.Bounds.Width > 0 {
@@ -295,7 +323,7 @@ func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult
 		return d.assertVisibleBrowser(step.Selector, timeout)
 	}
 
-	_, info, err := d.findElementFast(step.Selector, step.IsOptional(), step.TimeoutMs)
+	_, info, err := d.findElementFastWithLazyRetry(step.Selector, step.IsOptional(), step.TimeoutMs)
 	if err != nil {
 		return errorResult(err, fmt.Sprintf("Element not visible: %v", err))
 	}
@@ -425,7 +453,7 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 	}
 
 	if !step.Selector.IsEmpty() {
-		elem, _, err := d.findElement(step.Selector, step.IsOptional(), step.TimeoutMs)
+		elem, _, err := d.findElementWithLazyRetry(step.Selector, step.IsOptional(), step.TimeoutMs)
 		if err != nil {
 			return errorResult(err, fmt.Sprintf("Element not found: %v", err))
 		}
@@ -1786,6 +1814,11 @@ func (d *Driver) waitUntil(step *flow.WaitUntilStep) *core.CommandResult {
 	ctx, cancel := context.WithTimeout(d.parentContext(), timeout)
 	defer cancel()
 
+	// extendedWaitUntil intentionally does NOT use lazy retry: the user
+	// explicitly asked for a long wait, so re-tapping the previous step's
+	// target would corrupt state for persistent buttons (e.g. Preload
+	// Details which stays on screen but triggers an async update — we
+	// saw this break Native Stack - Preload Flow with triple-taps).
 	for {
 		select {
 		case <-ctx.Done():
