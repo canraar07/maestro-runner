@@ -742,10 +742,14 @@ type ClearNetworkMocksStep struct {
 // Media Steps
 // ============================================
 
-// TakeScreenshotStep takes a screenshot.
+// TakeScreenshotStep takes a screenshot. When CropOn is set, the screenshot
+// is cropped to the bounds of the matched element instead of capturing the
+// whole screen. Mirrors Maestro's takeScreenshot.cropOn (see
+// https://docs.maestro.dev/reference/commands-available/takescreenshot).
 type TakeScreenshotStep struct {
 	BaseStep `yaml:",inline"`
-	Path     string `yaml:"path"`
+	Path     string    `yaml:"path"`
+	CropOn   *Selector `yaml:"cropOn,omitempty"`
 }
 
 // StartRecordingStep starts recording.

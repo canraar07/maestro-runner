@@ -1446,6 +1446,22 @@ func (d *Driver) takeScreenshot(step *flow.TakeScreenshotStep) *core.CommandResu
 		return errorResult(err, fmt.Sprintf("Failed to take screenshot: %v", err))
 	}
 
+	if step.CropOn != nil {
+		_, info, findErr := d.findElement(*step.CropOn, false, 0)
+		if findErr != nil || info == nil {
+			return errorResult(findErr, fmt.Sprintf("cropOn: element not found: %v", findErr))
+		}
+		sw, sh, dimErr := d.screenSize()
+		if dimErr != nil {
+			return errorResult(dimErr, "cropOn requires screen dimensions")
+		}
+		cropped, cropErr := core.CropScreenshot(data, info.Bounds, sw, sh)
+		if cropErr != nil {
+			return errorResult(cropErr, fmt.Sprintf("cropOn: %v", cropErr))
+		}
+		data = cropped
+	}
+
 	// Return screenshot data; caller handles saving to file if path specified
 	return &core.CommandResult{
 		Success: true,

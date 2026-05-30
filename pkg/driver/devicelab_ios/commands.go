@@ -298,6 +298,29 @@ func (d *Driver) handleTakeScreenshot(s *flow.TakeScreenshotStep) *core.CommandR
 	if err != nil {
 		return core.ErrorResult(err, "screenshot failed")
 	}
+
+	if s.CropOn != nil {
+		node, findErr := d.findElement(*s.CropOn, false, 0)
+		if findErr != nil || node == nil {
+			return core.ErrorResult(findErr, fmt.Sprintf("cropOn: element not found: %v", findErr))
+		}
+		sw, sh := d.screenDims()
+		if sw <= 0 || sh <= 0 {
+			return core.ErrorResult(fmt.Errorf("screen dimensions unknown"), "cropOn requires screen dimensions")
+		}
+		bounds := core.Bounds{
+			X:      int(node.Rect.X),
+			Y:      int(node.Rect.Y),
+			Width:  int(node.Rect.Width),
+			Height: int(node.Rect.Height),
+		}
+		cropped, cropErr := core.CropScreenshot(png, bounds, sw, sh)
+		if cropErr != nil {
+			return core.ErrorResult(cropErr, fmt.Sprintf("cropOn: %v", cropErr))
+		}
+		png = cropped
+	}
+
 	res := core.SuccessResult("screenshot taken", nil)
 	res.Data = png
 	return res
