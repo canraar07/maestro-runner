@@ -243,12 +243,29 @@ func (d *Driver) maybeLazyRetryTap() bool {
 		return false
 	}
 
-	// Primary signal: is the tap's target element STILL findable? If yes,
+	// Gate: the screen must be UNCHANGED since the tap. recordTap captured the
+	// tree hash immediately before the click; if a fresh hash now differs, the
+	// tap demonstrably caused something — an error message rendered, an async
+	// submit resolved, a dialog opened, a partial transition began. Re-tapping
+	// in that state is wrong: e.g. a failed-login flow keeps the login button
+	// on screen (so the element-presence check below would wrongly fire) while
+	// the "Invalid credentials" error renders — that render flips the hash, so
+	// we correctly treat the original tap as effective and skip the retry.
+	// A genuinely missed tap (fired at phantom off-screen bounds, nothing hit)
+	// produces no ripple and leaves the hash identical, so real misses still
+	// retry. On hash-read failure we fall through to the element check rather
+	// than skip, preserving prior behaviour.
+	if curHash, hashErr := d.client.TreeHash(); hashErr == nil && curHash != d.lastTapHash {
+		logger.Info("[devicelab] lazy retry skip: tree hash changed since tap (%x→%x) — tap had effect", d.lastTapHash, curHash)
+		return false
+	}
+
+	// Secondary signal: is the tap's target element STILL findable? If yes,
 	// the tap clearly didn't navigate away from it → tap had no effect →
-	// retry. This is more specific than tree-hash because it directly
-	// answers "did the screen transition?": if the source button is still
-	// there, we're on the same screen. Animations, ripples, focus changes
-	// etc. do not remove the original button — only a real navigation does.
+	// retry. Combined with the hash gate above this is precise: same screen
+	// (hash unchanged) AND source button still present → the tap was eaten.
+	// Animations, ripples, focus changes etc. do not remove the original
+	// button — only a real navigation does.
 	_, _, findErr := d.findElementFast(d.lastTapSelector, true, 50)
 	if findErr != nil {
 		// Source element gone → tap navigated → don't retry.
