@@ -984,6 +984,29 @@ func (d *Driver) findElementWithContext(ctx context.Context, sel flow.Selector, 
 		}
 	}
 
+	// Plain-text VISIBILITY checks (assertVisible / fast, non-clickable):
+	// poll the agent's combined-OR UI.findText, which determines visibility
+	// from on-screen bounds rather than the unreliable isVisibleToUser()
+	// flag. RN routinely reports displayed=false for elements that have valid
+	// bounds, which made the legacy page-source fallback return the element
+	// with Visible=false → "Element exists but is not visible". Bounds-based
+	// matching mirrors agent-device. Tap/inputText (preferClickable or
+	// non-fast) keep the element-handle path below for clickable-ancestor
+	// promotion and key entry.
+	if !d.isBrowserMode() && fastMode && !preferClickable && isPlainTextSelector(sel) {
+		for {
+			select {
+			case <-ctx.Done():
+				return nil, nil, fmt.Errorf("element '%s' not found: %w", sel.Describe(), ctx.Err())
+			default:
+				if info, err := d.findTextFast(sel); err == nil {
+					return nil, info, nil
+				}
+				time.Sleep(waitUntilPollInterval)
+			}
+		}
+	}
+
 	// Build strategies for UiAutomator
 	var strategies []LocatorStrategy
 	var err error
