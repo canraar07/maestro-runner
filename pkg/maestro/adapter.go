@@ -155,6 +155,38 @@ func (a *Adapter) FindFirstOf(strategiesAndSelectors []string) (*uiautomator2.El
 	return elem, nil
 }
 
+// FindText finds the first on-screen node whose text, content-desc, or hint
+// matches the pattern, in a SINGLE RPC. The agent does one tree traversal with
+// a combined-OR matcher (case-insensitive contains, or case-insensitive regex
+// when the pattern looks like one) — far cheaper than the legacy text path
+// which fires ~6 UI.findElement RPCs plus a full UI.getSource dump per poll.
+func (a *Adapter) FindText(text string) (*uiautomator2.Element, error) {
+	resp, err := a.client.Call("UI.findText", map[string]interface{}{
+		"text": text,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var result ElementResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return nil, fmt.Errorf("parse findText result: %w", err)
+	}
+
+	elem := uiautomator2.NewCachedElement(
+		result.ElementID,
+		result.Text,
+		uiautomator2.ElementRect{
+			X:      result.Bounds.X,
+			Y:      result.Bounds.Y,
+			Width:  result.Bounds.Width,
+			Height: result.Bounds.Height,
+		},
+	)
+	a.wireElementActions(elem, result.ElementID)
+	return elem, nil
+}
+
 // FindAndClick finds an element and clicks it in a single RPC call.
 func (a *Adapter) FindAndClick(strategy, selector string) (*uiautomator2.Element, error) {
 	resp, err := a.client.Call("Gesture.findAndClick", map[string]interface{}{

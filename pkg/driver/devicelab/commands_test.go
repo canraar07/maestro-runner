@@ -66,6 +66,9 @@ func (m *mockDeviceLabClient) TreeHash() (uint64, error)                     { r
 func (m *mockDeviceLabClient) FindFirstOf([]string) (*uiautomator2.Element, error) {
 	return nil, fmt.Errorf("not implemented in mock")
 }
+func (m *mockDeviceLabClient) FindText(string) (*uiautomator2.Element, error) {
+	return nil, fmt.Errorf("element not found")
+}
 func (m *mockDeviceLabClient) WaitForWindowUpdate(string, int) (bool, error) { return false, nil }
 
 // Compile-time check

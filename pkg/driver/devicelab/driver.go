@@ -80,6 +80,12 @@ type DeviceLabClient interface {
 	// once per strategy. Pairs are passed flat: [s1, sel1, s2, sel2, ...].
 	FindFirstOf(strategiesAndSelectors []string) (*uiautomator2.Element, error)
 
+	// FindText finds the first on-screen node matching the text/content-desc/
+	// hint of a plain text selector in a SINGLE RPC (one agent-side tree
+	// traversal with a combined-OR matcher). Lightweight replacement for the
+	// ~6-RPC + getSource text path on the visibility-poll loops.
+	FindText(text string) (*uiautomator2.Element, error)
+
 	// WaitForWindowUpdate blocks up to timeoutMs for a window-content-changed
 	// event on the target package. Returns true if updated, false if window
 	// stayed stable for the full timeout. Mirrors Maestro's isWindowUpdating.
@@ -1105,6 +1111,17 @@ func (d *Driver) findElementOnce(sel flow.Selector) (*uiautomator2.Element, *cor
 		return d.findElementByPageSourceOnce(sel)
 	}
 
+	// Plain text selector: one combined-OR traversal on the agent (1 RPC)
+	// instead of ~6 UiSelector RPCs. The matcher is a superset of the legacy
+	// strategies (case-insensitive text||desc||hint contains/regex), so a hit
+	// here is authoritative. On a miss we still fall through to the legacy
+	// strategies + page-source path below, keeping behavior fully additive.
+	if isPlainTextSelector(sel) {
+		if info, err := d.findTextFast(sel); err == nil {
+			return nil, info, nil
+		}
+	}
+
 	strategies, err := buildSelectors(sel, 0)
 	if err != nil {
 		return nil, nil, err
@@ -1130,6 +1147,49 @@ func (d *Driver) findElementOnce(sel flow.Selector) (*uiautomator2.Element, *cor
 // findElementQuick finds an element without polling (single attempt).
 func (d *Driver) findElementQuick(sel flow.Selector, timeoutMs int) (*uiautomator2.Element, *core.ElementInfo, error) {
 	return d.findElementOnce(sel)
+}
+
+// isPlainTextSelector reports whether sel is a pure text selector with no
+// other constraints — the exact case the combined-OR agent matcher
+// (UI.findText) handles in a single tree traversal. Anything that needs
+// clickable/state/relative/index/size/id semantics falls back to the
+// existing find paths.
+func isPlainTextSelector(sel flow.Selector) bool {
+	return sel.Text != "" &&
+		sel.ID == "" &&
+		!sel.HasRelativeSelector() &&
+		!sel.HasNonZeroIndex() &&
+		sel.Width == 0 && sel.Height == 0 &&
+		sel.Enabled == nil && sel.Selected == nil &&
+		sel.Focused == nil && sel.Checked == nil
+}
+
+// findTextFast does a single lightweight find for a plain text selector via
+// the agent's combined-OR matcher (one RPC, one traversal). Used by the
+// visibility-poll loops where the only question is presence; keeps each poll
+// cheap so slow emulators get many attempts inside tight timeout windows.
+func (d *Driver) findTextFast(sel flow.Selector) (*core.ElementInfo, error) {
+	elem, err := d.client.FindText(sel.Text)
+	if err != nil {
+		return nil, err
+	}
+	info := &core.ElementInfo{
+		ID:      elem.ID(),
+		Visible: true,
+		Enabled: true,
+	}
+	if text, terr := elem.Text(); terr == nil {
+		info.Text = text
+	}
+	if rect, rerr := elem.Rect(); rerr == nil {
+		info.Bounds = core.Bounds{
+			X:      rect.X,
+			Y:      rect.Y,
+			Width:  rect.Width,
+			Height: rect.Height,
+		}
+	}
+	return info, nil
 }
 
 // tryFindElementFast attempts to find element using given strategies (single attempt).
