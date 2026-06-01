@@ -1804,35 +1804,6 @@ func (d *Driver) stopRecording(_ *flow.StopRecordingStep) *core.CommandResult {
 // Wait Commands
 // ============================================================================
 
-const (
-	// waitUntil/extendedWaitUntil poll tuning. Before each find we wait
-	// (bounded) for the agent's accessibility-settle so we match a STABLE
-	// tree instead of a mid-render frame — mirrors agent-device's
-	// waitForIdle-before-snapshot. The poll interval paces the loop so it
-	// stops busy-spinning (which starved slow emulators and hammered the
-	// agent with back-to-back hierarchy dumps). Soak finding: maestro-runner
-	// 32/38 vs agent-device 38/38 on the RN-nav suite, identical setup —
-	// the failures were all the deep-link first-page extendedWaitUntil.
-	waitUntilSettleTimeoutMs = 800
-	waitUntilSettleQuietMs   = 150
-	waitUntilPollInterval    = 100 * time.Millisecond
-)
-
-// findForWait is the per-poll find used by the (extended)waitUntil loops.
-// For a plain text selector it issues exactly ONE combined-OR RPC
-// (UI.findText) and does NOT fall through to the heavy ~6-RPC + getSource
-// path on a miss — keeping every poll iteration cheap so slow emulators get
-// many attempts inside a tight timeout window (the soak failure mode). The
-// matcher is a superset of the legacy text strategies, so no real match is
-// lost. Non-text selectors keep the full findElementOnce behavior.
-func (d *Driver) findForWait(sel flow.Selector) (*core.ElementInfo, error) {
-	if !d.isBrowserMode() && isPlainTextSelector(sel) {
-		return d.findTextFast(sel)
-	}
-	_, info, err := d.findElementOnce(sel)
-	return info, err
-}
-
 func (d *Driver) waitUntil(step *flow.WaitUntilStep) *core.CommandResult {
 	timeoutMs := 30000
 	if step.TimeoutMs > 0 {
@@ -1878,25 +1849,17 @@ func (d *Driver) waitUntil(step *flow.WaitUntilStep) *core.CommandResult {
 				fmt.Sprintf("Element '%s' still visible after %v", selector.Describe(), timeout),
 			)
 		default:
-			// Settle before each find: on a shared-CPU device polling the agent
-			// flat-out steals cycles from the app itself (async preloads, RN
-			// re-renders), pushing tight hardcoded windows past their deadline.
-			// The bounded settle both paces the loop and matches a STABLE tree.
-			_, _ = d.WaitForSettle(waitUntilSettleTimeoutMs, waitUntilSettleQuietMs)
 			if waitingForVisible {
-				info, err := d.findForWait(*step.Visible)
+				_, info, err := d.findElementOnce(*step.Visible)
 				if err == nil && info != nil {
 					return successResult("Element is now visible", info)
 				}
 			} else {
-				info, err := d.findForWait(*step.NotVisible)
+				_, info, err := d.findElementOnce(*step.NotVisible)
 				if err != nil || info == nil {
 					return successResult("Element is no longer visible", nil)
 				}
 			}
-			// Pace the loop — stop the busy-spin that starves the device and
-			// hammers the agent with back-to-back hierarchy dumps.
-			time.Sleep(waitUntilPollInterval)
 		}
 	}
 }
