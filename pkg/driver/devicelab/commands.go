@@ -1825,10 +1825,18 @@ const (
 // many attempts inside a tight timeout window (the soak failure mode). The
 // matcher is a superset of the legacy text strategies, so no real match is
 // lost. Non-text selectors keep the full findElementOnce behavior.
+//
+// The plain-text path deliberately SKIPS the pre-find WaitForSettle: findText
+// is bounds-based (mid-render frames with degenerate bounds don't match) and
+// we poll fast, so a stable frame is caught within a few iterations. The
+// settle only runs for the heavy path, where matching a mid-render snapshot is
+// a real risk. This matters on tight windows — an 800ms settle per poll left
+// only ~3 attempts in a 3.5s extendedWaitUntil on slow devices.
 func (d *Driver) findForWait(sel flow.Selector) (*core.ElementInfo, error) {
 	if !d.isBrowserMode() && isPlainTextSelector(sel) {
 		return d.findTextFast(sel)
 	}
+	_, _ = d.WaitForSettle(waitUntilSettleTimeoutMs, waitUntilSettleQuietMs)
 	_, info, err := d.findElementOnce(sel)
 	return info, err
 }
@@ -1878,13 +1886,9 @@ func (d *Driver) waitUntil(step *flow.WaitUntilStep) *core.CommandResult {
 				fmt.Sprintf("Element '%s' still visible after %v", selector.Describe(), timeout),
 			)
 		default:
-			// Match against a SETTLED tree, not a mid-render one. A debug RN
-			// app re-renders continuously on cold launch / navigation, so an
-			// ungated snapshot keeps missing freshly-shown content. Wait
-			// (bounded) for the agent's accessibility-settle before each find.
-			// Best-effort: a never-idle app just times out the settle and we
-			// find anyway.
-			_, _ = d.WaitForSettle(waitUntilSettleTimeoutMs, waitUntilSettleQuietMs)
+			// findForWait gates the settle internally: the plain-text
+			// findText path skips it (bounds-based + fast polling), the heavy
+			// path still settles before matching a mid-render snapshot.
 			if waitingForVisible {
 				info, err := d.findForWait(*step.Visible)
 				if err == nil && info != nil {

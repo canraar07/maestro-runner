@@ -86,6 +86,11 @@ type DeviceLabClient interface {
 	// ~6-RPC + getSource text path on the visibility-poll loops.
 	FindText(text string) (*uiautomator2.Element, error)
 
+	// FindClickableText is FindText with clickable-ancestor promotion, used by
+	// the tap path: one combined-OR traversal returning the nearest clickable
+	// on-screen ancestor of the text match.
+	FindClickableText(text string) (*uiautomator2.Element, error)
+
 	// WaitForWindowUpdate blocks up to timeoutMs for a window-content-changed
 	// event on the target package. Returns true if updated, false if window
 	// stayed stable for the full timeout. Mirrors Maestro's isWindowUpdating.
@@ -851,6 +856,16 @@ func (d *Driver) findElementDirectWithContext(ctx context.Context, sel flow.Sele
 	for {
 		select {
 		case <-ctx.Done():
+			// Deadline fallback: one full combined-strategy attempt. Covers
+			// non-clickable text labels that the clickable-promotion fast path
+			// can't return (no clickable ancestor).
+			if !d.isBrowserMode() {
+				if elem, info, err := d.tryFindElement(combined); err == nil {
+					return elem, info, nil
+				} else {
+					lastErr = err
+				}
+			}
 			if lastErr != nil {
 				return nil, nil, fmt.Errorf("%s: %w", ctx.Err(), lastErr)
 			}
@@ -878,14 +893,23 @@ func (d *Driver) findElementDirectWithContext(ctx context.Context, sel flow.Sele
 				continue
 			}
 
-			elem, info, err := d.tryFindElement(combined)
-			if err == nil {
+			// Primary: single combined-OR clickable-promoted text find (1 RPC).
+			// Replaces the ~6 per-attempt UiSelector RPCs so the slow-device
+			// poll loop gets many more attempts to catch a late-appearing
+			// button. The full combined-strategy set remains the deadline
+			// fallback above for non-clickable text labels.
+			if elem, info, err := d.findClickableTextFast(sel); err == nil {
 				return elem, info, nil
+			} else {
+				lastErr = err
 			}
-			lastErr = err
+			time.Sleep(tapPollInterval)
 		}
 	}
 }
+
+// tapPollInterval paces the lightweight tap-target poll loop.
+const tapPollInterval = 80 * time.Millisecond
 
 // buildClickableOnlyStrategies builds UiAutomator strategies that only match clickable elements.
 func buildClickableOnlyStrategies(sel flow.Selector) ([]LocatorStrategy, error) {
@@ -1213,6 +1237,29 @@ func (d *Driver) findTextFast(sel flow.Selector) (*core.ElementInfo, error) {
 		}
 	}
 	return info, nil
+}
+
+// findClickableTextFast does a single lightweight tap-target find for a plain
+// text selector via the agent's combined-OR matcher with clickable-ancestor
+// promotion (one RPC). Returns the clickable element (with wired click) plus
+// its info. Used as the primary per-poll attempt on the tap path.
+func (d *Driver) findClickableTextFast(sel flow.Selector) (*uiautomator2.Element, *core.ElementInfo, error) {
+	elem, err := d.client.FindClickableText(sel.Text)
+	if err != nil {
+		return nil, nil, err
+	}
+	info := &core.ElementInfo{
+		ID:      elem.ID(),
+		Visible: true,
+		Enabled: true,
+	}
+	if text, terr := elem.Text(); terr == nil {
+		info.Text = text
+	}
+	if rect, rerr := elem.Rect(); rerr == nil {
+		info.Bounds = core.Bounds{X: rect.X, Y: rect.Y, Width: rect.Width, Height: rect.Height}
+	}
+	return elem, info, nil
 }
 
 // tryFindElementFast attempts to find element using given strategies (single attempt).

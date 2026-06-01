@@ -187,6 +187,38 @@ func (a *Adapter) FindText(text string) (*uiautomator2.Element, error) {
 	return elem, nil
 }
 
+// FindClickableText is FindText with clickable-ancestor promotion: the agent
+// matches the text then returns the nearest clickable on-screen ancestor, in a
+// single RPC. Used by the tap path to replace its ~6 per-attempt UiSelector
+// RPCs with one combined-OR traversal so slow devices get more attempts.
+func (a *Adapter) FindClickableText(text string) (*uiautomator2.Element, error) {
+	resp, err := a.client.Call("UI.findText", map[string]interface{}{
+		"text":      text,
+		"clickable": true,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var result ElementResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return nil, fmt.Errorf("parse findText result: %w", err)
+	}
+
+	elem := uiautomator2.NewCachedElement(
+		result.ElementID,
+		result.Text,
+		uiautomator2.ElementRect{
+			X:      result.Bounds.X,
+			Y:      result.Bounds.Y,
+			Width:  result.Bounds.Width,
+			Height: result.Bounds.Height,
+		},
+	)
+	a.wireElementActions(elem, result.ElementID)
+	return elem, nil
+}
+
 // FindAndClick finds an element and clicks it in a single RPC call.
 func (a *Adapter) FindAndClick(strategy, selector string) (*uiautomator2.Element, error) {
 	resp, err := a.client.Call("Gesture.findAndClick", map[string]interface{}{
