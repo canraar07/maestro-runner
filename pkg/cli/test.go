@@ -483,7 +483,12 @@ type RunConfig struct {
 	// Driver
 	Driver       string                 // uiautomator2, appium
 	AppiumURL    string                 // Appium server URL
-	CapsFile     string                 // Appium capabilities JSON file path
+	// AppiumSessionFile, when set, makes maestro-runner publish live Appium
+	// session info (sessionId + appiumUrl per device) to this JSON file via the
+	// session-export provider, so external tools can attach without polling
+	// reports. Runs alongside any detected cloud provider. See issue #91.
+	AppiumSessionFile string
+	CapsFile          string                 // Appium capabilities JSON file path
 	Capabilities map[string]interface{} // Parsed Appium capabilities
 
 	// Driver settings
@@ -684,6 +689,7 @@ func runTest(c *cli.Context) error {
 		AppID:              appID,
 		Driver:             getString("driver"),
 		AppiumURL:          getString("appium-url"),
+		AppiumSessionFile:  getString("appium-session-file"),
 		CapsFile:           capsFile,
 		Capabilities:       caps,
 		WaitForIdleTimeout: getInt("wait-for-idle-timeout"),
@@ -1909,13 +1915,23 @@ func createAppiumDriver(cfg *RunConfig) (core.Driver, func(), error) {
 	info := driver.GetPlatformInfo()
 	logger.Info("Appium session created successfully: %s", info.DeviceID)
 
-	// Detect cloud provider and extract metadata
+	// Build the provider chain: detected cloud provider (if any) + the session
+	// exporter (if --appium-session-file is set). Composite runs them all, so a
+	// cloud provider and the session file work together. See issue #91.
+	var providers []cloud.Provider
 	if p := cloud.Detect(cfg.AppiumURL); p != nil {
-		cfg.CloudProvider = p
+		providers = append(providers, p)
+	}
+	if cfg.AppiumSessionFile != "" {
+		providers = append(providers, cloud.NewSessionExporter(cfg.AppiumSessionFile))
+	}
+	if cp := cloud.Composite(providers...); cp != nil {
+		cfg.CloudProvider = cp
 		cfg.CloudMeta = make(map[string]string)
-		p.ExtractMeta(driver.SessionID(), driver.SessionCaps(), cfg.CloudMeta)
+		cp.ExtractMeta(driver.SessionID(), driver.SessionCaps(), cfg.CloudMeta)
 		cfg.CloudMeta[cloud.MetaAppiumURL] = strings.TrimSpace(cfg.AppiumURL)
-		logger.Info("Cloud provider detected: %s", p.Name())
+		cfg.CloudMeta[cloud.MetaDeviceID] = info.DeviceID
+		logger.Info("Cloud provider(s): %s", cp.Name())
 	}
 
 	// Print session details
