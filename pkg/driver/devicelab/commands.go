@@ -91,8 +91,10 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 						if t, err := elem.Text(); err == nil {
 							info.Text = t
 						}
+						rectOK := false
 						if rect, err := elem.Rect(); err == nil {
 							info.Bounds = core.Bounds{X: rect.X, Y: rect.Y, Width: rect.Width, Height: rect.Height}
+							rectOK = true
 						}
 						logger.Info("[devicelab] FindAndClick hit for %s via %s=%s: bounds=[%d,%d][%d,%d] (w=%d h=%d) center=(%d,%d)",
 							step.Selector.Describe(), s.Strategy, s.Value,
@@ -100,6 +102,27 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 							info.Bounds.X+info.Bounds.Width, info.Bounds.Y+info.Bounds.Height,
 							info.Bounds.Width, info.Bounds.Height,
 							info.Bounds.X+info.Bounds.Width/2, info.Bounds.Y+info.Bounds.Height/2)
+
+						// #94: reject a tap whose rect is malformed (non-positive
+						// width/height) or whose centre lies off-screen, and keep
+						// polling. The agent's id-find path applies no on-screen
+						// filter, so a just-opened bottom sheet's first laid-out
+						// frame yields a clipped rect (top>bottom) and FindAndClick
+						// injects the tap off-screen — a no-op that leaves the flow
+						// desynced. A settled frame a moment later taps the real
+						// target. (Mirrors the assert-side viewport check from #39.)
+						if rectOK {
+							if sw, sh, serr := d.screenSize(); serr == nil && !boundsTappable(info.Bounds, sw, sh) {
+								logger.Info("[devicelab] tap rejected (off-screen/malformed rect) for %s: w=%d h=%d center=(%d,%d) screen=%dx%d — re-polling",
+									step.Selector.Describe(), info.Bounds.Width, info.Bounds.Height,
+									info.Bounds.X+info.Bounds.Width/2, info.Bounds.Y+info.Bounds.Height/2, sw, sh)
+								lastErr = fmt.Errorf("element rect not tappable (w=%d h=%d center=(%d,%d) screen=%dx%d)",
+									info.Bounds.Width, info.Bounds.Height,
+									info.Bounds.X+info.Bounds.Width/2, info.Bounds.Y+info.Bounds.Height/2, sw, sh)
+								time.Sleep(50 * time.Millisecond)
+								break
+							}
+						}
 
 						// Post-tap verification candidates (all wired but
 						// NOT called — empirically none reliably distinguish
@@ -172,6 +195,19 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 	}
 
 	return successResult("Tapped on element", info)
+}
+
+// boundsTappable reports whether b is a real on-screen rectangle whose centre
+// can be tapped. It rejects a malformed rect (non-positive width/height — e.g.
+// a clipped first-frame rect with top>bottom) and one whose centre falls
+// outside the display. Used to avoid injecting a lost off-screen tap (#94).
+func boundsTappable(b core.Bounds, screenW, screenH int) bool {
+	if b.Width <= 0 || b.Height <= 0 {
+		return false
+	}
+	cx := b.X + b.Width/2
+	cy := b.Y + b.Height/2
+	return cx >= 0 && cx < screenW && cy >= 0 && cy < screenH
 }
 
 // tapOnBrowser handles tapOn entirely via CDP for Chrome browser mode.
