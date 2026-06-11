@@ -7,6 +7,7 @@ package devicelab
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -135,6 +136,20 @@ const (
 	lazyRetryMax      = 2
 )
 
+// lazyRetryEnabled gates the host-side lazy tap-retry. OFF by default.
+//
+// The retry fires when "tree hash unchanged since the tap AND the tap target
+// is still findable", treating that as "the tap had no effect, re-issue it".
+// That predicate cannot distinguish a genuinely dropped tap from a successful
+// tap whose effect is async (submit-then-navigate) or that merely disables the
+// source button without changing the hash — so it can re-issue a tap across a
+// navigation boundary and land on the next screen's CTA (issue #95). Disabled
+// by default; set MAESTRO_DEVICELAB_LAZY_RETRY=1 to opt back in.
+var lazyRetryEnabled = func() bool {
+	v := os.Getenv("MAESTRO_DEVICELAB_LAZY_RETRY")
+	return v == "1" || strings.EqualFold(v, "true")
+}()
+
 // New creates a new DeviceLab driver.
 func New(client DeviceLabClient, info *core.PlatformInfo, device ShellExecutor) *Driver {
 	return &Driver{
@@ -205,6 +220,9 @@ const (
 // BEFORE the click fires. Resets the retry counter to 0 — this is a new
 // original tap, not a re-attempt.
 func (d *Driver) recordTap(sel flow.Selector) {
+	if !lazyRetryEnabled {
+		return // lazy retry disabled — skip the per-tap TreeHash round-trip
+	}
 	hash, err := d.client.TreeHash()
 	if err != nil {
 		// If we can't read the hash, just clear state — lazy retry will skip.
@@ -230,6 +248,9 @@ func (d *Driver) recordTap(sel flow.Selector) {
 // knows to keep polling. Returns false otherwise (caller continues its
 // normal failure path).
 func (d *Driver) maybeLazyRetryTap() bool {
+	if !lazyRetryEnabled {
+		return false // lazy retry disabled by default (issue #95)
+	}
 	if d.lastTapTime.IsZero() {
 		logger.Info("[devicelab] lazy retry skip: no recent tap recorded")
 		return false
