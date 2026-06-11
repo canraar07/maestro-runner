@@ -223,8 +223,17 @@ func createUIAutomator2Driver(cfg *RunConfig, dev *device.AndroidDevice, info de
 	// Set waitForIdle timeout - configurable via --wait-for-idle-timeout or config.yaml
 	// Default is 5000ms which balances speed and reliability
 	// Set to 0 to disable (faster but may miss animations)
+	//
+	// enableMultiWindows=true makes the server's page source and element search
+	// span ALL accessibility windows, not just the focused one. Without it,
+	// content in a separate window — AlertDialogs, permission prompts, and
+	// Material ExposedDropdownMenu / Spinner popups (ListPopupWindow) — is
+	// invisible, so tapOn an item reports "no such element" even though it is on
+	// screen (issue #93). Stock Maestro's instrumentation always traverses all
+	// windows; this aligns the uiautomator2 driver with that behavior.
 	if err := client.SetAppiumSettings(map[string]interface{}{
 		"waitForIdleTimeout": cfg.WaitForIdleTimeout,
+		"enableMultiWindows": true,
 	}); err != nil {
 		fmt.Printf("  %s⚠%s Warning: failed to set appium settings: %v\n", color(colorYellow), color(colorReset), err)
 	}
