@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.17] - 2026-06-12
+
+A reporter-driven reliability release centred on Android tap/find correctness, plus a new Appium session-export hook. Headlines: elements living in a **separate window** — `AlertDialog`s, runtime-permission prompts, drawers, and Material dropdown/spinner popups — are now found instead of reported missing; taps can no longer fire **off-screen** from a malformed first-frame rect; the Android lazy tap-retry is **disabled by default** (it could re-tap across a navigation boundary onto the next screen); and live Appium sessions can be published to a well-known file for external tools.
+
+### Added
+- **`--appium-session-file <path>`** (env `MAESTRO_APPIUM_SESSION_FILE`) — publishes the live Appium session(s) (`sessionId` + `appiumUrl` per device) to a single JSON file so external tools can attach without polling report artifacts. Off by default. One entry per device (parallel runs share one file, no clobbering), new-session-per-flow updates in place, and the file is rewritten atomically (temp + rename) so readers never see a partial file. Requested by [@ssharma007-dev](https://github.com/ssharma007-dev) ([#91](https://github.com/devicelab-dev/maestro-runner/issues/91)).
+  ```bash
+  maestro-runner --driver appium --appium-session-file /tmp/sessions.json test flows/
+  ```
+
+### Fixed
+- **DeviceLab Android: find elements inside dialogs / permission prompts / drawers** — the on-device agent searched only the focused window, so a control rendered in a separate accessibility window (e.g. an `AlertDialog`'s **OK**/**Discard** button, a runtime-permission prompt, or a drawer) was reported "not found" even though it was on screen. The agent now searches every window (topmost first) when the focused window misses. Bundled agent APK refreshed. Reported by [@simon-kuzin](https://github.com/simon-kuzin) ([#90](https://github.com/devicelab-dev/maestro-runner/issues/90)).
+- **uiautomator2: dropdown / spinner popup items not in the hierarchy** — the default driver only exposed the focused window, so items in a Material `ExposedDropdownMenu`, a `Spinner`, or any `ListPopupWindow` (and `AlertDialog`s / permission prompts) were invisible and `tapOn` failed with "no such element" even with the popup on screen. maestro-runner now enables the server's `enableMultiWindows` setting, matching stock Maestro's all-windows traversal. Reported by [@ConorGarry](https://github.com/ConorGarry) ([#93](https://github.com/devicelab-dev/maestro-runner/issues/93)).
+- **DeviceLab Android: off-screen tap from a malformed first-frame rect** — `FindAndClick` took its tap point from whatever rect the find returned; a just-opened bottom sheet's first laid-out frame could yield a clipped rect (top > bottom, negative height) or one translated below the viewport, so the tap fired off-screen and was lost, desyncing the flow. The tap path now rejects a non-positive-width/height or off-screen-centre rect and keeps polling for a settled frame (mirroring the assert-side viewport check). Reported by [@laiskajoonas](https://github.com/laiskajoonas) ([#94](https://github.com/devicelab-dev/maestro-runner/issues/94)).
+
+### Changed
+- **DeviceLab Android: lazy tap-retry disabled by default** — the lazy retry re-issued a tap when "the tree hash was unchanged since the tap and the target was still findable", treating that as "the tap had no effect". That predicate cannot distinguish a dropped tap from a successful one whose effect is async (submit-then-navigate) or that merely disables the source button, so it could re-issue a tap across a navigation boundary and land on the next screen's CTA. It is now off by default; opt back in with `MAESTRO_DEVICELAB_LAZY_RETRY=1`. Reported by [@laiskajoonas](https://github.com/laiskajoonas) ([#95](https://github.com/devicelab-dev/maestro-runner/issues/95)).
+
 ## [1.1.16] - 2026-05-31
 
 Another reporter-driven reliability + parity release, with a notable new capability: an **experimental native iOS DeviceLab driver**. Headlines: `takeScreenshot` gains Maestro-compatible `cropOn` cropping across every driver, a new `--artifacts` flag controls when screenshots/hierarchy are captured, `setLocation` now works on iOS simulators, Android DeviceLab tap reliability on React Native navigation jumped from ~20/38 to 37/38 on the React Navigation example suite, and the iOS startup path is far more resilient under CI load.
