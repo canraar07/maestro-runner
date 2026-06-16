@@ -112,7 +112,12 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 						// desynced. A settled frame a moment later taps the real
 						// target. (Mirrors the assert-side viewport check from #39.)
 						if rectOK {
-							if sw, sh, serr := d.screenSize(); serr == nil && !boundsTappable(info.Bounds, sw, sh) {
+							// Validate against the FULL physical display (same coordinate
+							// space as info.Bounds, which come from the accessibility
+							// hierarchy). screenSize() can report the USABLE height (minus
+							// the status bar), which wrongly condemns on-screen bottom
+							// buttons/FABs whose centre sits in the bottom band.
+							if sw, sh, serr := d.tappableScreenSize(); serr == nil && !boundsTappable(info.Bounds, sw, sh) {
 								logger.Info("[devicelab] tap rejected (off-screen/malformed rect) for %s: w=%d h=%d center=(%d,%d) screen=%dx%d — re-polling",
 									step.Selector.Describe(), info.Bounds.Width, info.Bounds.Height,
 									info.Bounds.X+info.Bounds.Width/2, info.Bounds.Y+info.Bounds.Height/2, sw, sh)
@@ -746,7 +751,12 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 	deadline := time.Now().Add(timeout)
 
-	width, height, err := d.screenSize()
+	// Use the FULL physical display (same coordinate space as the hierarchy bounds). An element
+	// in the bottom system-bar band — e.g. the last nav-drawer item, centre y in
+	// (usableHeight, physicalHeight] — is genuinely on screen and tappable (see boundsTappable),
+	// so isElementOnScreen must NOT treat it as off-screen; otherwise scrollUntilVisible loops to
+	// the scroll cap on a last item that is already shown. Falls back to screenSize().
+	width, height, err := d.tappableScreenSize()
 	if err != nil {
 		return errorResult(err, "Failed to get screen size")
 	}
