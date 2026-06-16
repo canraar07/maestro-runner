@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -106,15 +107,17 @@ type Driver struct {
 	// Cached values to avoid repeated ADB shell calls
 	cachedAPILevel   int
 	cachedActivities map[string]string // appID -> activity
+	cachedScreenW    int               // physical display width  (from `wm size`)
+	cachedScreenH    int               // physical display height (from `wm size`)
 
 	// CDP state from background push events (nil = not wired)
 	cdpStateFunc func() *core.CDPInfo
 
 	// WebView CDP connection manager (nil = not wired)
-	webView        *webViewManager
-	lastCDPScan    time.Time     // rate-limit ADB shell CDP scans
-	lastCDPResult  *core.CDPInfo // cached result from last scan
-	knownCDPType   string        // "browser" or "webview" — set from socket name, cleared on CDP down
+	webView       *webViewManager
+	lastCDPScan   time.Time     // rate-limit ADB shell CDP scans
+	lastCDPResult *core.CDPInfo // cached result from last scan
+	knownCDPType  string        // "browser" or "webview" — set from socket name, cleared on CDP down
 
 	// Lazy retry state: each successful tap captures the pre-tap tree hash
 	// + selector + time. If the NEXT element-based command can't find its
@@ -131,9 +134,9 @@ type Driver struct {
 // "recent enough" to retry. Probe: how long we let the next command poll
 // before doing the hash check. Max: retry cap per original tap.
 const (
-	lazyRetryWindow   = 2 * time.Second
-	lazyRetryProbeMs  = 500
-	lazyRetryMax      = 2
+	lazyRetryWindow  = 2 * time.Second
+	lazyRetryProbeMs = 500
+	lazyRetryMax     = 2
 )
 
 // lazyRetryEnabled gates the host-side lazy tap-retry. OFF by default.
@@ -244,6 +247,7 @@ func (d *Driver) recordTap(sel flow.Selector) {
 //   - a tap happened recently (within lazyRetryWindow)
 //   - the tree hash hasn't changed since that tap (screen unchanged)
 //   - we haven't exceeded lazyRetryMax for this tap
+//
 // If all true, it re-issues the prior tap and returns true so the caller
 // knows to keep polling. Returns false otherwise (caller continues its
 // normal failure path).
@@ -350,6 +354,77 @@ func (d *Driver) screenSize() (int, int, error) {
 		return d.info.ScreenWidth, d.info.ScreenHeight, nil
 	}
 	return 0, 0, fmt.Errorf("screen dimensions not available")
+}
+
+// physicalScreenSize returns the full physical display size (e.g. 1080x2340 from
+// `wm size`), cached for the session. Unlike screenSize() — which returns the
+// on-device-reported USABLE size (it can exclude the status bar, e.g. 1080x2204) —
+// this matches the coordinate space of the accessibility hierarchy (whose root spans
+// the full display), so it is the correct reference for on-screen geometry checks
+// against element bounds. Returns ok=false if it cannot be determined.
+func (d *Driver) physicalScreenSize() (int, int, bool) {
+	if d.cachedScreenW > 0 && d.cachedScreenH > 0 {
+		return d.cachedScreenW, d.cachedScreenH, true
+	}
+	if d.device == nil {
+		return 0, 0, false
+	}
+	out, err := d.device.Shell("wm size")
+	if err != nil {
+		return 0, 0, false
+	}
+	w, h := parseWmSize(out)
+	if w <= 0 || h <= 0 {
+		return 0, 0, false
+	}
+	d.cachedScreenW, d.cachedScreenH = w, h
+	return w, h, true
+}
+
+// tappableScreenSize returns the screen size used to validate element bounds: the
+// full physical display (same coordinate space as the accessibility hierarchy that
+// produced the bounds), falling back to the on-device-reported size when the
+// physical size is unavailable.
+func (d *Driver) tappableScreenSize() (int, int, error) {
+	if w, h, ok := d.physicalScreenSize(); ok {
+		return w, h, nil
+	}
+	return d.screenSize()
+}
+
+// parseWmSize extracts width x height from `wm size` output. It prefers an
+// "Override size" line (the effective display size when one is set) over the
+// "Physical size" line.
+func parseWmSize(out string) (int, int) {
+	var pw, ph, ow, oh int
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "Physical size:"):
+			pw, ph = parseWxH(strings.TrimPrefix(line, "Physical size:"))
+		case strings.HasPrefix(line, "Override size:"):
+			ow, oh = parseWxH(strings.TrimPrefix(line, "Override size:"))
+		}
+	}
+	if ow > 0 && oh > 0 {
+		return ow, oh
+	}
+	return pw, ph
+}
+
+// parseWxH parses "1080x2340" (tolerating surrounding spaces) into width, height.
+func parseWxH(s string) (int, int) {
+	s = strings.TrimSpace(s)
+	i := strings.IndexByte(s, 'x')
+	if i <= 0 {
+		return 0, 0
+	}
+	w, err1 := strconv.Atoi(strings.TrimSpace(s[:i]))
+	h, err2 := strconv.Atoi(strings.TrimSpace(s[i+1:]))
+	if err1 != nil || err2 != nil {
+		return 0, 0
+	}
+	return w, h
 }
 
 // SetContext sets the parent context for element-finding operations.
@@ -671,19 +746,19 @@ func (d *Driver) scanCDPSocket() *core.CDPInfo {
 // knownBrowserPackages is the set of Android packages that are browsers.
 // Matches the on-device Java agent's browser detection logic.
 var knownBrowserPackages = map[string]bool{
-	"com.android.chrome":        true,
-	"com.chrome.beta":           true,
-	"com.chrome.dev":            true,
-	"com.chrome.canary":         true,
-	"org.chromium.chrome":       true,
-	"app.vanadium.browser":      true,
-	"org.mozilla.firefox":       true,
-	"org.mozilla.firefox_beta":  true,
-	"com.opera.browser":         true,
-	"com.opera.mini.native":     true,
-	"com.brave.browser":         true,
-	"com.microsoft.emmx":        true,
-	"com.vivaldi.browser":       true,
+	"com.android.chrome":           true,
+	"com.chrome.beta":              true,
+	"com.chrome.dev":               true,
+	"com.chrome.canary":            true,
+	"org.chromium.chrome":          true,
+	"app.vanadium.browser":         true,
+	"org.mozilla.firefox":          true,
+	"org.mozilla.firefox_beta":     true,
+	"com.opera.browser":            true,
+	"com.opera.mini.native":        true,
+	"com.brave.browser":            true,
+	"com.microsoft.emmx":           true,
+	"com.vivaldi.browser":          true,
 	"com.sec.android.app.sbrowser": true,
 }
 

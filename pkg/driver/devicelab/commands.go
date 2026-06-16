@@ -112,7 +112,12 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 						// desynced. A settled frame a moment later taps the real
 						// target. (Mirrors the assert-side viewport check from #39.)
 						if rectOK {
-							if sw, sh, serr := d.screenSize(); serr == nil && !boundsTappable(info.Bounds, sw, sh) {
+							// Validate against the FULL physical display (same coordinate
+							// space as info.Bounds, which come from the accessibility
+							// hierarchy). screenSize() can report the USABLE height (minus
+							// the status bar), which wrongly condemns on-screen bottom
+							// buttons/FABs whose centre sits in the bottom band.
+							if sw, sh, serr := d.tappableScreenSize(); serr == nil && !boundsTappable(info.Bounds, sw, sh) {
 								logger.Info("[devicelab] tap rejected (off-screen/malformed rect) for %s: w=%d h=%d center=(%d,%d) screen=%dx%d — re-polling",
 									step.Selector.Describe(), info.Bounds.Width, info.Bounds.Height,
 									info.Bounds.X+info.Bounds.Width/2, info.Bounds.Y+info.Bounds.Height/2, sw, sh)
