@@ -68,6 +68,22 @@ func TestTappableScreenSize_FallsBackToReported(t *testing.T) {
 	}
 }
 
+// TestIsElementOnScreen_BottomBand is the scroll-side analogue of the tap fix: the last
+// nav-drawer item ("Configuration") sits in the bottom system-bar band — bounds [61,2208][709,2340]
+// on a 1080x2340 display whose USABLE height is 2204. It is genuinely on screen and tappable, so
+// isElementOnScreen must accept it when given the PHYSICAL height; otherwise scrollUntilVisible
+// loops to the scroll cap on an item that is already shown. scrollUntilVisible now sources the
+// height from tappableScreenSize() (physical) for exactly this reason.
+func TestIsElementOnScreen_BottomBand(t *testing.T) {
+	lastDrawerItem := &core.ElementInfo{Bounds: core.Bounds{X: 61, Y: 2208, Width: 648, Height: 132}}
+	if isElementOnScreen(lastDrawerItem, 1080, 2204) {
+		t.Errorf("sanity: y=2208 must be off-screen against usable height 2204 (the bug)")
+	}
+	if !isElementOnScreen(lastDrawerItem, 1080, 2340) {
+		t.Errorf("last drawer item (y=2208..2340) must be on-screen against physical height 2340")
+	}
+}
+
 func TestPhysicalScreenSize_CachesWmSize(t *testing.T) {
 	shell := &mockShell{out: "Physical size: 1080x2340\n"}
 	d := New(&mockDeviceLabClient{}, &core.PlatformInfo{}, shell)

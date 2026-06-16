@@ -751,7 +751,12 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 	deadline := time.Now().Add(timeout)
 
-	width, height, err := d.screenSize()
+	// Use the FULL physical display (same coordinate space as the hierarchy bounds). An element
+	// in the bottom system-bar band — e.g. the last nav-drawer item, centre y in
+	// (usableHeight, physicalHeight] — is genuinely on screen and tappable (see boundsTappable),
+	// so isElementOnScreen must NOT treat it as off-screen; otherwise scrollUntilVisible loops to
+	// the scroll cap on a last item that is already shown. Falls back to screenSize().
+	width, height, err := d.tappableScreenSize()
 	if err != nil {
 		return errorResult(err, "Failed to get screen size")
 	}
