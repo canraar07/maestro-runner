@@ -845,10 +845,15 @@ func (d *Driver) scrollByAdb(direction string, screenWidth, screenHeight int, pe
 const scrollDurationMs = 300
 
 // isElementOnScreen reports whether an element's bounds overlap the visible
-// viewport. Zero-area bounds count as off-screen.
+// viewport. Malformed bounds — non-positive width/height, e.g. a clipped
+// below-the-fold ScrollView child reported with top>bottom (negative height) —
+// count as off-screen, matching boundsTappable's #94 guard. Without this,
+// scrollUntilVisible short-circuits to success on a degenerate rect that tapOn
+// then refuses to tap ("element rect not tappable"), looping to the deadline
+// instead of scrolling the element fully into view.
 func isElementOnScreen(info *core.ElementInfo, screenWidth, screenHeight int) bool {
 	b := info.Bounds
-	if b.Width == 0 || b.Height == 0 {
+	if b.Width <= 0 || b.Height <= 0 {
 		return false
 	}
 	return b.X+b.Width > 0 && b.X < screenWidth && b.Y+b.Height > 0 && b.Y < screenHeight

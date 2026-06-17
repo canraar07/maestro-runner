@@ -180,6 +180,13 @@ func TestIsElementOnScreen(t *testing.T) {
 		{"entirely right of screen", core.Bounds{X: 1080, Y: 100, Width: 200, Height: 200}, false},
 		{"zero width", core.Bounds{X: 100, Y: 100, Width: 0, Height: 200}, false},
 		{"zero height", core.Bounds{X: 100, Y: 100, Width: 200, Height: 0}, false},
+		{"negative width", core.Bounds{X: 100, Y: 100, Width: -50, Height: 200}, false},
+		// Repro from the field: a clipped below-the-fold ScrollView button the
+		// agent reports with top>bottom (raw [270,2300][1080,2274] → h=-26,
+		// centre (675,2287)). Overlaps the viewport numerically, but is a
+		// degenerate rect tapOn refuses (boundsTappable's #94 guard); the scroll
+		// success predicate must reject it too so the loop keeps scrolling.
+		{"negative height (clipped below-fold)", core.Bounds{X: 270, Y: 2300, Width: 810, Height: -26}, false},
 	}
 
 	for _, tt := range tests {
