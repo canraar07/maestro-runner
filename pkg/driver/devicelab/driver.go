@@ -213,9 +213,9 @@ func (d *Driver) tapHadEffectViaWindowUpdate(appID string) bool {
 }
 
 const (
-	tapVerifyAttempts     = 3
-	tapVerifyInterval     = 30 * time.Millisecond
-	windowUpdateTimeoutMs = 500
+	tapVerifyAttempts     = 3 //nolint:unused
+	tapVerifyInterval     = 30 * time.Millisecond //nolint:unused
+	windowUpdateTimeoutMs = 500 //nolint:unused
 )
 
 // recordTap captures the current tree hash so a later failing assertion can

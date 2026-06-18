@@ -14,7 +14,7 @@ import (
 // Selector semantics mirror the existing wda driver: substring/regex on
 // text+label+value+placeholder, exact-or-regex on id (accessibility
 // identifier), state filters, width/height tolerance.
-func findInSnapshot(nodes []SnapshotNode, sel flow.Selector) []*SnapshotNode {
+func findInSnapshot(nodes []SnapshotNode, sel flow.Selector) []*SnapshotNode { //nolint:unused
 	if len(nodes) == 0 {
 		return nil
 	}

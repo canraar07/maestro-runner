@@ -665,7 +665,7 @@ func (d *Driver) hideKeyboard(_ *flow.HideKeyboardStep) *core.CommandResult {
 	// Retry up to 3 times — the on-device agent tries KEYCODE_ESCAPE first
 	// (keyboard-only, no navigation side-effects), then falls back to KEYCODE_BACK.
 	for attempt := 0; attempt < 3; attempt++ {
-		d.client.HideKeyboard()
+		_ = d.client.HideKeyboard()
 
 		// Wait for keyboard to actually disappear (animation ~300ms).
 		deadline := time.Now().Add(500 * time.Millisecond)

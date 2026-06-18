@@ -689,6 +689,7 @@ func (d *Driver) findElementQuick(sel flow.Selector, timeoutMs int) (*core.Eleme
 // wrapper views that XCUITest can't classify as accessible but which clearly
 // contain visible content. Hidden-but-still-mounted screens (all descendants
 // invisible) are correctly excluded.
+//nolint:unused
 func filterVisibleOrHostingVisible(candidates []*ParsedElement) []*ParsedElement {
 	out := candidates[:0]
 	for _, c := range candidates {
