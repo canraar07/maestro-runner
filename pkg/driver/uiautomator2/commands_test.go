@@ -4180,6 +4180,10 @@ func TestIsElementOnScreen(t *testing.T) {
 		{"entirely above screen", core.Bounds{X: 100, Y: -300, Width: 200, Height: 200}, false},
 		{"zero width", core.Bounds{X: 100, Y: 100, Width: 0, Height: 200}, false},
 		{"zero height", core.Bounds{X: 100, Y: 100, Width: 200, Height: 0}, false},
+		{"negative width", core.Bounds{X: 100, Y: 100, Width: -50, Height: 200}, false},
+		// Malformed clipped rect (top>bottom → negative height): degenerate, must
+		// count as off-screen so scrollUntilVisible keeps scrolling.
+		{"negative height (clipped)", core.Bounds{X: 270, Y: 2300, Width: 810, Height: -26}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
