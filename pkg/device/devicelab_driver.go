@@ -142,7 +142,7 @@ func (d *AndroidDevice) checkUiAutomationConflict() error {
 	for _, pkg := range knownConflicts {
 		if strings.Contains(output, pkg) {
 			logger.Info("Stopping %s to avoid UiAutomation conflict", pkg)
-			d.Shell("am force-stop " + pkg)
+			_, _ = d.Shell("am force-stop " + pkg)
 		}
 	}
 
@@ -159,7 +159,7 @@ func (d *AndroidDevice) checkUiAutomationConflict() error {
 			if idx := strings.Index(line, "/"); idx > 0 {
 				pkg := line[:idx]
 				logger.Info("Stopping active instrumentation: %s", pkg)
-				d.Shell("am force-stop " + pkg)
+				_, _ = d.Shell("am force-stop " + pkg)
 			}
 		}
 	}
@@ -352,7 +352,7 @@ func checkDeviceLabHandshake(network, address string) bool {
 	}
 	defer conn.Close()
 
-	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
 	// Send a minimal WebSocket upgrade request
 	handshake := "GET / HTTP/1.1\r\n" +

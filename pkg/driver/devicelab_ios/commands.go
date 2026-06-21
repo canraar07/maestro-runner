@@ -1159,7 +1159,7 @@ func flattenArguments(args map[string]any) []string {
 	return out
 }
 
-func bytesEqual(a, b []byte) bool {
+func bytesEqual(a, b []byte) bool { //nolint:unused
 	if len(a) != len(b) {
 		return false
 	}

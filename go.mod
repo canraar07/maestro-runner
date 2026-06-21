@@ -1,6 +1,6 @@
 module github.com/devicelab-dev/maestro-runner
 
-go 1.22.0
+go 1.23
 
 require (
 	github.com/urfave/cli/v2 v2.27.7
@@ -10,6 +10,7 @@ require (
 require (
 	github.com/Masterminds/semver v1.5.0 // indirect
 	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
+	github.com/coder/websocket v1.8.15
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
 	github.com/danielpaulus/go-ios v1.0.131 // indirect
 	github.com/dlclark/regexp2 v1.11.4 // indirect
@@ -53,6 +54,5 @@ require (
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	gvisor.dev/gvisor v0.0.0-20240405191320-0878b34101b5 // indirect
 	howett.net/plist v0.0.0-20200419221736-3b63eb3a43b5 // indirect
-	nhooyr.io/websocket v1.8.17 // indirect
 	software.sslmate.com/src/go-pkcs12 v0.2.0 // indirect
 )

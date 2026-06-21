@@ -167,13 +167,13 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 				attempt-1, maxStartupAttempts, lastErr,
 			)
 			fmt.Fprintln(os.Stderr, banner)
-			fmt.Fprintln(os.Stderr, fmt.Sprintf("  ↻ Retrying (attempt %d/%d)...", attempt, maxStartupAttempts))
+			fmt.Fprintf(os.Stderr, "  ↻ Retrying (attempt %d/%d)...\n", attempt, maxStartupAttempts)
 			// Mirror into the runner log so the artifact captures the full
 			// retry history (logFile may be closed if we hit the fallback
 			// branch above; guard before writing).
 			if opts.Stdout != os.Stderr {
 				fmt.Fprintln(opts.Stdout, banner)
-				fmt.Fprintln(opts.Stdout, fmt.Sprintf("=== attempt %d/%d ===", attempt, maxStartupAttempts))
+				fmt.Fprintf(opts.Stdout, "=== attempt %d/%d ===\n", attempt, maxStartupAttempts)
 			}
 			// Reset the simulator before retrying. Killing xcodebuild
 			// alone doesn't unwedge a stuck CoreSimulator daemon — if
@@ -185,14 +185,14 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 				// Best-effort: log and continue. If reset fails the
 				// retry attempt will reveal whether the sim is still
 				// usable.
-				fmt.Fprintln(os.Stderr, fmt.Sprintf("  ⚠ simctl reset failed: %v (continuing anyway)", rerr))
+				fmt.Fprintf(os.Stderr, "  ⚠ simctl reset failed: %v (continuing anyway)\n", rerr)
 			}
 		}
 
 		client, handle, err := startOnce(ctx, opts, xctestrun, logPath)
 		if err == nil {
 			if attempt > 1 {
-				fmt.Fprintln(os.Stderr, fmt.Sprintf("  ✓ Runner started on attempt %d/%d", attempt, maxStartupAttempts))
+				fmt.Fprintf(os.Stderr, "  ✓ Runner started on attempt %d/%d\n", attempt, maxStartupAttempts)
 			}
 			return client, handle, nil
 		}
@@ -312,7 +312,7 @@ func injectPortIntoXctestrun(path string, port int) error {
 // usable again.
 func resetSimulator(ctx context.Context, udid string, logOut io.Writer) error {
 	if logOut != nil {
-		fmt.Fprintln(logOut, fmt.Sprintf("  ⟳ Resetting simulator %s...", udid))
+		fmt.Fprintf(logOut, "  ⟳ Resetting simulator %s...\n", udid)
 	}
 	shutdownCmd := exec.CommandContext(ctx, "xcrun", "simctl", "shutdown", udid)
 	if out, err := shutdownCmd.CombinedOutput(); err != nil {
