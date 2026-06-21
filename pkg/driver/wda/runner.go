@@ -202,13 +202,13 @@ func (r *Runner) Start(ctx context.Context) error {
 				attempt-1, maxStartupAttempts, lastErr,
 			)
 			fmt.Fprintln(os.Stderr, banner)
-			fmt.Fprintln(os.Stderr, fmt.Sprintf("  ↻ Retrying (attempt %d/%d)...", attempt, maxStartupAttempts))
+			fmt.Fprintf(os.Stderr, "  ↻ Retrying (attempt %d/%d)...\n", attempt, maxStartupAttempts)
 			// Mirror banner into the runner log so the failure artifact
 			// captures the full retry history. Use append mode so we
 			// don't lose the previous attempt's xcodebuild output.
 			if f, ferr := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644); ferr == nil {
 				fmt.Fprintln(f, banner)
-				fmt.Fprintln(f, fmt.Sprintf("=== attempt %d/%d ===", attempt, maxStartupAttempts))
+				fmt.Fprintf(f, "=== attempt %d/%d ===\n", attempt, maxStartupAttempts)
 				_ = f.Close()
 			}
 			// Reset the simulator before retrying. Killing xcodebuild alone
@@ -220,7 +220,7 @@ func (r *Runner) Start(ctx context.Context) error {
 			// wedge pattern anyway).
 			if r.isSimulatorCache {
 				if rerr := resetSimulator(ctx, r.deviceUDID); rerr != nil {
-					fmt.Fprintln(os.Stderr, fmt.Sprintf("  ⚠ simctl reset failed: %v (continuing anyway)", rerr))
+					fmt.Fprintf(os.Stderr, "  ⚠ simctl reset failed: %v (continuing anyway)\n", rerr)
 				}
 			}
 		}
@@ -228,7 +228,7 @@ func (r *Runner) Start(ctx context.Context) error {
 		err := r.startOnce(ctx, xctestrun, logPath, attempt)
 		if err == nil {
 			if attempt > 1 {
-				fmt.Fprintln(os.Stderr, fmt.Sprintf("  ✓ WDA started on attempt %d/%d", attempt, maxStartupAttempts))
+				fmt.Fprintf(os.Stderr, "  ✓ WDA started on attempt %d/%d\n", attempt, maxStartupAttempts)
 			}
 			// For physical devices, forward the WDA port from device to localhost.
 			if !r.isSimulatorCache {

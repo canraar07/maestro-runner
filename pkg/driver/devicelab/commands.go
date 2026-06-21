@@ -112,7 +112,12 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 						// desynced. A settled frame a moment later taps the real
 						// target. (Mirrors the assert-side viewport check from #39.)
 						if rectOK {
-							if sw, sh, serr := d.screenSize(); serr == nil && !boundsTappable(info.Bounds, sw, sh) {
+							// Validate against the FULL physical display (same coordinate
+							// space as info.Bounds, which come from the accessibility
+							// hierarchy). screenSize() can report the USABLE height (minus
+							// the status bar), which wrongly condemns on-screen bottom
+							// buttons/FABs whose centre sits in the bottom band.
+							if sw, sh, serr := d.tappableScreenSize(); serr == nil && !boundsTappable(info.Bounds, sw, sh) {
 								logger.Info("[devicelab] tap rejected (off-screen/malformed rect) for %s: w=%d h=%d center=(%d,%d) screen=%dx%d — re-polling",
 									step.Selector.Describe(), info.Bounds.Width, info.Bounds.Height,
 									info.Bounds.X+info.Bounds.Width/2, info.Bounds.Y+info.Bounds.Height/2, sw, sh)
@@ -660,7 +665,7 @@ func (d *Driver) hideKeyboard(_ *flow.HideKeyboardStep) *core.CommandResult {
 	// Retry up to 3 times — the on-device agent tries KEYCODE_ESCAPE first
 	// (keyboard-only, no navigation side-effects), then falls back to KEYCODE_BACK.
 	for attempt := 0; attempt < 3; attempt++ {
-		d.client.HideKeyboard()
+		_ = d.client.HideKeyboard()
 
 		// Wait for keyboard to actually disappear (animation ~300ms).
 		deadline := time.Now().Add(500 * time.Millisecond)
@@ -746,7 +751,12 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 	deadline := time.Now().Add(timeout)
 
-	width, height, err := d.screenSize()
+	// Use the FULL physical display (same coordinate space as the hierarchy bounds). An element
+	// in the bottom system-bar band — e.g. the last nav-drawer item, centre y in
+	// (usableHeight, physicalHeight] — is genuinely on screen and tappable (see boundsTappable),
+	// so isElementOnScreen must NOT treat it as off-screen; otherwise scrollUntilVisible loops to
+	// the scroll cap on a last item that is already shown. Falls back to screenSize().
+	width, height, err := d.tappableScreenSize()
 	if err != nil {
 		return errorResult(err, "Failed to get screen size")
 	}
@@ -835,10 +845,15 @@ func (d *Driver) scrollByAdb(direction string, screenWidth, screenHeight int, pe
 const scrollDurationMs = 300
 
 // isElementOnScreen reports whether an element's bounds overlap the visible
-// viewport. Zero-area bounds count as off-screen.
+// viewport. Malformed bounds — non-positive width/height, e.g. a clipped
+// below-the-fold ScrollView child reported with top>bottom (negative height) —
+// count as off-screen, matching boundsTappable's #94 guard. Without this,
+// scrollUntilVisible short-circuits to success on a degenerate rect that tapOn
+// then refuses to tap ("element rect not tappable"), looping to the deadline
+// instead of scrolling the element fully into view.
 func isElementOnScreen(info *core.ElementInfo, screenWidth, screenHeight int) bool {
 	b := info.Bounds
-	if b.Width == 0 || b.Height == 0 {
+	if b.Width <= 0 || b.Height <= 0 {
 		return false
 	}
 	return b.X+b.Width > 0 && b.X < screenWidth && b.Y+b.Height > 0 && b.Y < screenHeight

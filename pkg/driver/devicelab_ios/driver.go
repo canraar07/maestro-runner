@@ -153,7 +153,7 @@ func (d *Driver) parentContext() context.Context {
 	return d.ctx
 }
 
-func (d *Driver) currentBundleID() string { return d.appID }
+func (d *Driver) currentBundleID() string { return d.appID } //nolint:unused
 
 // callTimeout returns a context with the find timeout applied (or a sane
 // default of 10s if unset).
