@@ -547,11 +547,15 @@ func (d *Driver) findElementForTapWithContext(ctx context.Context, sel flow.Sele
 
 			if textExistsErr != nil {
 				// Text not found via WDA at all - try page source as fallback
-				if info, err := d.findElementByPageSourceOnce(sel); err == nil {
+				info, psErr := d.findElementByPageSourceOnce(sel)
+				if psErr == nil {
 					return info, nil
 				}
-				// Still not found - keep polling
-				lastErr = textExistsErr
+				// Still not found - keep polling. Surface both failures:
+				// the page-source reason (with closest-text hints) is the
+				// actionable one; hiding it behind the predicate error sent
+				// issue #89's diagnosis down the wrong path.
+				lastErr = fmt.Errorf("%w; page source: %v", textExistsErr, psErr)
 				continue
 			}
 
@@ -1005,6 +1009,11 @@ func (d *Driver) findElementByPageSourceOnce(sel flow.Selector) (*core.ElementIn
 	// rather than XCUITest's opinion. When accepting a visible="false" element
 	// we tag a MatchNote so the report records the override (see rescueNote).
 	if len(candidates) == 0 {
+		if sel.Text != "" {
+			if closest := ClosestTexts(allElements, sel.Text, 3); len(closest) > 0 {
+				return nil, fmt.Errorf("no elements match selector; closest on-screen texts: %s", strings.Join(closest, ", "))
+			}
+		}
 		return nil, fmt.Errorf("no elements match selector")
 	}
 
