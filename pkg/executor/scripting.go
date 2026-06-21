@@ -175,9 +175,13 @@ func (se *ScriptEngine) RunScript(script string, env map[string]string) error {
 	// Expand variables in script
 	script = se.ExpandVariables(script)
 
-	// Apply env variables
+	// Apply env variables, expanded so values like
+	// "mockoon-cli start --port ${output.port}" resolve before the script
+	// reads them — matching defineVariables / runFlow env and vanilla Maestro
+	// (#107). Previously these were set verbatim, leaking literal ${...} into
+	// the script.
 	for k, v := range env {
-		se.SetVariable(k, v)
+		se.SetVariable(k, se.ExpandVariables(v))
 	}
 
 	// Pre-define potential env variables as undefined to avoid ReferenceError.
@@ -513,13 +517,28 @@ func parseBoolExpr(s string) bool {
 }
 
 // ParseInt parses an integer from string, supporting variable expansion.
+// Invalid or empty input silently yields defaultVal. Callers that need to
+// reject malformed input (e.g. `times: abc`) should use ParseIntStrict.
 func (se *ScriptEngine) ParseInt(s string, defaultVal int) int {
-	s = se.ExpandVariables(s)
-	s = strings.ReplaceAll(s, "_", "") // Support 10_000 format
-	if val, err := strconv.Atoi(s); err == nil {
-		return val
+	val, _ := se.ParseIntStrict(s, defaultVal)
+	return val
+}
+
+// ParseIntStrict parses an integer from string with variable expansion and
+// "10_000" grouping. An empty value (field unspecified) yields defaultVal with
+// no error; a non-empty value that is not a valid integer yields defaultVal and
+// an error, so callers can surface a clear message instead of silently falling
+// back to the default.
+func (se *ScriptEngine) ParseIntStrict(s string, defaultVal int) (int, error) {
+	expanded := strings.ReplaceAll(se.ExpandVariables(s), "_", "")
+	if strings.TrimSpace(expanded) == "" {
+		return defaultVal, nil
 	}
-	return defaultVal
+	val, err := strconv.Atoi(expanded)
+	if err != nil {
+		return defaultVal, fmt.Errorf("%q is not a valid integer", strings.TrimSpace(expanded))
+	}
+	return val, nil
 }
 
 // ExpandStep expands variables in all string fields of a step.
@@ -580,22 +599,33 @@ func (se *ScriptEngine) ExpandStep(step flow.Step) {
 		s.File = se.ExpandVariables(s.File)
 		s.ElseFile = se.ExpandVariables(s.ElseFile)
 		if s.When != nil {
-			if s.When.Visible != nil {
-				s.When.Visible = se.expandSelector(s.When.Visible)
-			}
-			if s.When.NotVisible != nil {
-				s.When.NotVisible = se.expandSelector(s.When.NotVisible)
-			}
-			if s.When.Script != "" {
-				s.When.Script = se.ExpandVariables(s.When.Script)
-			}
-			if s.When.Platform != "" {
-				s.When.Platform = se.ExpandVariables(s.When.Platform)
-			}
+			se.ExpandCondition(s.When)
 		}
 		for k, v := range s.Env {
 			s.Env[k] = se.ExpandVariables(v)
 		}
+	}
+}
+
+// ExpandCondition expands variables in a condition's selector and string
+// fields, in place. Used for `runFlow: when:` and `repeat: while:` — the
+// latter re-expands every iteration so a loop body that mutates an
+// interpolated variable (e.g. ${output.i}) is reflected in the next check.
+func (se *ScriptEngine) ExpandCondition(cond *flow.Condition) {
+	if cond == nil {
+		return
+	}
+	if cond.Visible != nil {
+		cond.Visible = se.expandSelector(cond.Visible)
+	}
+	if cond.NotVisible != nil {
+		cond.NotVisible = se.expandSelector(cond.NotVisible)
+	}
+	if cond.Script != "" {
+		cond.Script = se.ExpandVariables(cond.Script)
+	}
+	if cond.Platform != "" {
+		cond.Platform = se.ExpandVariables(cond.Platform)
 	}
 }
 

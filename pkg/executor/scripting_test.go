@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
@@ -185,6 +186,36 @@ func TestScriptEngine_RunScript_WithEnv(t *testing.T) {
 
 	if got := se.GetVariable("msg"); got != "hello_test" {
 		t.Errorf("msg = %q, want %q", got, "hello_test")
+	}
+}
+
+// TestScriptEngine_RunScript_EnvValuesAreExpanded reproduces #107: env values
+// passed to runScript must be variable-expanded (like defineVariables/runFlow
+// env), so an exec string referencing an outer variable and prior output
+// resolves before the script reads it — instead of leaking literal ${...}.
+func TestScriptEngine_RunScript_EnvValuesAreExpanded(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	// Outer variable, as if injected by a runFlow env.
+	se.SetVariable("MOCK_FILE", "Login.json")
+	// Prior runScript discovered a port and stored it in output.
+	if err := se.RunScript("output.mock_port = 8888", nil); err != nil {
+		t.Fatalf("seed script: %v", err)
+	}
+
+	// Second runScript: env value interpolates both the outer variable and
+	// the prior output. The script copies exec to output so we can assert it.
+	err := se.RunScript("output.cmd = exec", map[string]string{
+		"exec": "mockoon-cli start --data ../mocks/${MOCK_FILE} --port ${output.mock_port}",
+	})
+	if err != nil {
+		t.Fatalf("RunScript() error = %v", err)
+	}
+
+	want := "mockoon-cli start --data ../mocks/Login.json --port 8888"
+	if got := se.GetVariable("cmd"); got != want {
+		t.Errorf("expanded exec = %q, want %q (literal ${...} leaked = bug)", got, want)
 	}
 }
 
@@ -413,6 +444,65 @@ func TestScriptEngine_ParseInt(t *testing.T) {
 		if got != tt.expected {
 			t.Errorf("ParseInt(%q, %d) = %d, want %d", tt.input, tt.defVal, got, tt.expected)
 		}
+	}
+}
+
+func TestScriptEngine_ParseIntStrict(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+	se.SetVariable("count", "5")
+
+	tests := []struct {
+		input   string
+		defVal  int
+		want    int
+		wantErr bool
+	}{
+		{"10", 0, 10, false},
+		{"${count}", 0, 5, false},
+		{"10_000", 0, 10000, false},
+		{"", 42, 42, false},     // unspecified → default, no error
+		{"  ", 42, 42, false},   // whitespace-only → default, no error
+		{"abc", 99, 99, true},   // garbage → default + error
+		{"5s", 7, 7, true},      // trailing unit → error (not silently 5)
+	}
+
+	for _, tt := range tests {
+		got, err := se.ParseIntStrict(tt.input, tt.defVal)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("ParseIntStrict(%q) err = %v, wantErr %v", tt.input, err, tt.wantErr)
+		}
+		if got != tt.want {
+			t.Errorf("ParseIntStrict(%q, %d) = %d, want %d", tt.input, tt.defVal, got, tt.want)
+		}
+	}
+}
+
+func TestExecuteRepeat_InvalidTimes(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+	fr := &FlowRunner{ctx: context.Background(), driver: &mockDriver{}, script: se}
+
+	result := fr.executeRepeat(&flow.RepeatStep{Times: "abc"})
+	if result.Success {
+		t.Error("expected failure for non-numeric times, got success")
+	}
+	if !strings.Contains(result.Message, "invalid 'times'") {
+		t.Errorf("message = %q, want it to mention invalid 'times'", result.Message)
+	}
+}
+
+func TestExecuteRetry_InvalidMaxRetries(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+	fr := &FlowRunner{ctx: context.Background(), driver: &mockDriver{}, script: se}
+
+	result := fr.executeRetry(&flow.RetryStep{MaxRetries: "five"})
+	if result.Success {
+		t.Error("expected failure for non-numeric maxRetries, got success")
+	}
+	if !strings.Contains(result.Message, "invalid 'maxRetries'") {
+		t.Errorf("message = %q, want it to mention invalid 'maxRetries'", result.Message)
 	}
 }
 
@@ -2068,5 +2158,95 @@ func TestScriptEngine_ExpandStep_RunFlowStep_NilWhen(t *testing.T) {
 
 	if step.File != "test.yaml" {
 		t.Errorf("File = %q, want %q", step.File, "test.yaml")
+	}
+}
+
+func TestScriptEngine_ExpandCondition(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	se.SetVariable("IDX", "3")
+	se.SetVariable("LABEL", "Done")
+	se.SetVariable("PLAT", "ios")
+
+	cond := &flow.Condition{
+		Visible:    &flow.Selector{ID: "tab-${IDX}"},
+		NotVisible: &flow.Selector{Text: "${LABEL}"},
+		Script:     "${IDX} > 0",
+		Platform:   "${PLAT}",
+	}
+
+	se.ExpandCondition(cond)
+
+	if cond.Visible.ID != "tab-3" {
+		t.Errorf("Visible.ID = %q, want %q", cond.Visible.ID, "tab-3")
+	}
+	if cond.NotVisible.Text != "Done" {
+		t.Errorf("NotVisible.Text = %q, want %q", cond.NotVisible.Text, "Done")
+	}
+	if cond.Script != "3 > 0" {
+		t.Errorf("Script = %q, want %q", cond.Script, "3 > 0")
+	}
+	if cond.Platform != "ios" {
+		t.Errorf("Platform = %q, want %q", cond.Platform, "ios")
+	}
+}
+
+func TestScriptEngine_ExpandCondition_Nil(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+	se.ExpandCondition(nil) // must not panic
+}
+
+// TestExecuteRepeat_WhileInterpolation reproduces issue #97: a `while:`
+// condition that interpolates a variable mutated by the loop body must be
+// re-expanded with the current value each iteration. The loop body bumps
+// output.i, and the while selector is id=tab-${output.i}; the driver reports
+// tab-1 and tab-2 visible but not tab-3, so the loop must run exactly twice
+// and query the freshly-interpolated id each pass — never the literal template.
+func TestExecuteRepeat_WhileInterpolation(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+	if err := se.RunScript("output.i = 1", nil); err != nil {
+		t.Fatalf("seed script failed: %v", err)
+	}
+
+	var queriedIDs []string
+	driver := &mockDriver{
+		executeFunc: func(step flow.Step) *core.CommandResult {
+			if av, ok := step.(*flow.AssertVisibleStep); ok {
+				queriedIDs = append(queriedIDs, av.Selector.ID)
+				// tab-1 and tab-2 are "visible"; tab-3 is not.
+				visible := av.Selector.ID == "tab-1" || av.Selector.ID == "tab-2"
+				return &core.CommandResult{Success: visible}
+			}
+			return &core.CommandResult{Success: true}
+		},
+	}
+
+	fr := &FlowRunner{ctx: context.Background(), driver: driver, script: se}
+
+	step := &flow.RepeatStep{
+		Times: "10",
+		While: flow.Condition{Visible: &flow.Selector{ID: "tab-${output.i}"}},
+		Steps: []flow.Step{
+			&flow.EvalScriptStep{Script: "output.i = output.i + 1"},
+		},
+	}
+
+	result := fr.executeRepeat(step)
+	if !result.Success {
+		t.Fatalf("executeRepeat failed: %v", result.Error)
+	}
+
+	// Loop runs while tab-1 (i=1) and tab-2 (i=2) are visible, stops at tab-3.
+	want := []string{"tab-1", "tab-2", "tab-3"}
+	if len(queriedIDs) != len(want) {
+		t.Fatalf("queried IDs = %v, want %v", queriedIDs, want)
+	}
+	for i, id := range want {
+		if queriedIDs[i] != id {
+			t.Errorf("query %d = %q, want %q (literal template leaked = re-expansion broken)", i, queriedIDs[i], id)
+		}
 	}
 }

@@ -578,7 +578,14 @@ func (fr *FlowRunner) executeRepeat(step *flow.RepeatStep) *core.CommandResult {
 	if hasWhile && step.Times == "" {
 		defaultTimes = 1000 // Max iterations for while loops without explicit times
 	}
-	times := fr.script.ParseInt(step.Times, defaultTimes)
+	times, err := fr.script.ParseIntStrict(step.Times, defaultTimes)
+	if err != nil {
+		return &core.CommandResult{
+			Success: false,
+			Error:   err,
+			Message: fmt.Sprintf("repeat: invalid 'times' value: %v", err),
+		}
+	}
 	if times <= 0 {
 		times = 1
 	}
@@ -593,9 +600,14 @@ func (fr *FlowRunner) executeRepeat(step *flow.RepeatStep) *core.CommandResult {
 			}
 		}
 
-		// Check while condition
+		// Check while condition. Expand a fresh copy of the condition each
+		// iteration: step.While keeps the pristine ${...} template so a loop
+		// body that mutates the interpolated variable is picked up next pass
+		// (in-place expansion would replace the template after iteration 1).
 		if hasWhile {
-			if !fr.script.CheckCondition(fr.ctx, step.While, fr.driver) {
+			whileCond := step.While
+			fr.script.ExpandCondition(&whileCond)
+			if !fr.script.CheckCondition(fr.ctx, whileCond, fr.driver) {
 				break // Condition no longer met
 			}
 		}
@@ -623,7 +635,14 @@ func (fr *FlowRunner) executeRepeat(step *flow.RepeatStep) *core.CommandResult {
 
 // executeRetry handles retry step execution.
 func (fr *FlowRunner) executeRetry(step *flow.RetryStep) *core.CommandResult {
-	maxRetries := fr.script.ParseInt(step.MaxRetries, 3)
+	maxRetries, err := fr.script.ParseIntStrict(step.MaxRetries, 3)
+	if err != nil {
+		return &core.CommandResult{
+			Success: false,
+			Error:   err,
+			Message: fmt.Sprintf("retry: invalid 'maxRetries' value: %v", err),
+		}
+	}
 
 	// Apply env variables with restore
 	defer fr.script.withEnvVars(step.Env)()
