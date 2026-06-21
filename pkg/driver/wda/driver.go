@@ -88,10 +88,25 @@ func NewDriver(client *Client, info *core.PlatformInfo, udid string) *Driver {
 // auto-handled.
 func (d *Driver) PrepareForFlow(steps []flow.Step) {
 	for _, s := range steps {
-		if launchApp, ok := s.(*flow.LaunchAppStep); ok {
-			d.alertAction = resolveAlertAction(launchApp.Permissions)
-			return
+		launchApp, ok := s.(*flow.LaunchAppStep)
+		if !ok {
+			continue
 		}
+		d.alertAction = resolveAlertAction(launchApp.Permissions)
+
+		// Real-device safety net (#108): system permission dialogs are
+		// auto-handled ONLY via WDA's defaultAlertAction, which needs a single
+		// accept/dismiss. Mixed permissions (e.g. camera=allow, location=deny)
+		// resolve to "" → no monitor → a permission prompt hangs the flow and the
+		// un-dismissed SpringBoard alert can wedge later runs. The simulator
+		// doesn't hit this (permissions are pre-granted via simctl). Warn so the
+		// failure isn't silent. An explicit `unset` is an intentional opt-out and
+		// stays silent.
+		if d.alertAction == "" && d.info != nil && !d.info.IsSimulator &&
+			len(launchApp.Permissions) > 0 && !hasAllValue(launchApp.Permissions, "unset") {
+			logger.Warn("[wda] launchApp declares mixed permissions; on a real iOS device WDA can only auto-accept or auto-dismiss ALL permission dialogs, so they won't be auto-handled and may block the flow (and can wedge the device). Use permissions: { all: allow } (or { all: deny }), or add an explicit acceptAlert/dismissAlert step where the prompt appears.")
+		}
+		return
 	}
 	// No launchApp in this flow — leave alertAction at "" (no auto-handling).
 }

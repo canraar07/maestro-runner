@@ -126,7 +126,7 @@ func (fr *FlowRunner) Run() FlowResult {
 	// flow contains a launchApp step (matches maestro's behavior of
 	// auto-handling permission alerts only when permissions are configured).
 	if preparer, ok := innerDriver.(core.FlowAware); ok {
-		preparer.PrepareForFlow(fr.flow.Steps)
+		preparer.PrepareForFlow(fr.collectStepsForPrepare())
 	}
 	if ensurer, ok := innerDriver.(core.SessionEnsurer); ok {
 		// Expand ${VAR} placeholders in top-level appId so CLI -e variables
@@ -568,6 +568,60 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 	}
 
 	return status, errorMsg, stepDuration
+}
+
+// maxPrepareScanDepth bounds runFlow expansion during pre-session scanning so a
+// cyclic or deeply nested subflow graph can't loop forever.
+const maxPrepareScanDepth = 10
+
+// collectStepsForPrepare returns the steps a FlowAware driver should inspect
+// before session creation, in execution order: the onFlowStart hook steps
+// followed by the body, with runFlow subflows (inline and file-based) expanded
+// inline. This lets the WDA driver find the launchApp that actually launches the
+// app — and its permissions — even when it lives in onFlowStart or a runFlow
+// subflow, instead of only the main body (#108). On a physical iOS device that
+// gap left defaultAlertAction empty, so system permission dialogs weren't
+// auto-accepted and could wedge the device; it also diverged from the simulator.
+//
+// onFlowStart comes first so a driver that takes the first launchApp selects the
+// one reached first at runtime. runFlow wrappers are dropped and their children
+// inlined; file-based subflows are parsed best-effort (parse errors are ignored
+// here — they surface during execution). A visited set + depth cap guard cycles.
+func (fr *FlowRunner) collectStepsForPrepare() []flow.Step {
+	var out []flow.Step
+	seen := make(map[string]bool)
+
+	var expand func(steps []flow.Step, depth int)
+	expand = func(steps []flow.Step, depth int) {
+		if depth > maxPrepareScanDepth {
+			return
+		}
+		for _, s := range steps {
+			rf, ok := s.(*flow.RunFlowStep)
+			if !ok {
+				out = append(out, s)
+				continue
+			}
+			// Inline subflow steps are already parsed.
+			if len(rf.Steps) > 0 {
+				expand(rf.Steps, depth+1)
+			}
+			// File-based subflow: parse it to reach its launchApp.
+			if rf.File != "" {
+				path := fr.script.ResolvePath(rf.File)
+				if !seen[path] {
+					seen[path] = true
+					if sub, err := flow.ParseFile(path); err == nil {
+						expand(sub.Steps, depth+1)
+					}
+				}
+			}
+		}
+	}
+
+	expand(fr.flow.Config.OnFlowStart, 0)
+	expand(fr.flow.Steps, 0)
+	return out
 }
 
 // executeRepeat handles repeat step execution.
