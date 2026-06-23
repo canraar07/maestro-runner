@@ -5935,3 +5935,45 @@ func TestSelectorLog(t *testing.T) {
 		})
 	}
 }
+
+// TestPrepareForFlow_AlertAction verifies which launchApp permissions arm WDA's
+// alert monitor (#108 follow-up). The flow runner already feeds PrepareForFlow a
+// flattened slice (body + onFlowStart + expanded runFlow), so here we cover how a
+// launchApp's permissions map to d.alertAction, including the mixed-permissions
+// case that, on a real device, leaves it empty (and triggers the warning).
+func TestPrepareForFlow_AlertAction(t *testing.T) {
+	cases := []struct {
+		name        string
+		isSimulator bool
+		perms       map[string]string
+		want        string
+	}{
+		{"no permissions defaults to accept", true, nil, "accept"},
+		{"all allow -> accept", true, map[string]string{"all": "allow"}, "accept"},
+		{"all deny -> dismiss", true, map[string]string{"all": "deny"}, "dismiss"},
+		{"all unset -> empty (opt-out)", true, map[string]string{"all": "unset"}, ""},
+		// Mixed permissions resolve to empty on both, but only warn on real device.
+		{"mixed -> empty (simulator)", true, map[string]string{"camera": "allow", "location": "deny"}, ""},
+		{"mixed -> empty (real device, warns)", false, map[string]string{"camera": "allow", "location": "deny"}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := &Driver{info: &core.PlatformInfo{Platform: "ios", IsSimulator: c.isSimulator}}
+			d.PrepareForFlow([]flow.Step{
+				&flow.LaunchAppStep{AppID: "com.example", Permissions: c.perms},
+			})
+			if d.alertAction != c.want {
+				t.Errorf("alertAction = %q, want %q", d.alertAction, c.want)
+			}
+		})
+	}
+}
+
+// TestPrepareForFlow_NoLaunchApp leaves the monitor off (alertAction stays "").
+func TestPrepareForFlow_NoLaunchApp(t *testing.T) {
+	d := &Driver{info: &core.PlatformInfo{Platform: "ios"}}
+	d.PrepareForFlow([]flow.Step{&flow.TapOnStep{}, &flow.BackStep{}})
+	if d.alertAction != "" {
+		t.Errorf("alertAction = %q, want empty (no launchApp = no monitor)", d.alertAction)
+	}
+}

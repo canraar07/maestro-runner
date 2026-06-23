@@ -356,11 +356,38 @@ func (d *Driver) eraseText(step *flow.EraseTextStep) *core.CommandResult {
 }
 
 func (d *Driver) hideKeyboard(_ *flow.HideKeyboardStep) *core.CommandResult {
-	if err := d.client.HideKeyboard(); err != nil {
-		// Don't fail - keyboard may not be visible
-		return successResult("Hide keyboard (may not have been visible)", nil)
+	// Appium's /appium/device/hide_keyboard is a no-op on some devices (notably
+	// several Samsung models): it returns success without closing the keyboard,
+	// so the next coordinate tap lands on the keyboard overlay (#42). We verify
+	// with dumpsys and, while the keyboard is still shown, fall back to a key
+	// event.
+	//
+	// KEYCODE_BACK dismisses the IME when it is open and only triggers back-
+	// navigation when the keyboard is NOT shown — so we send it ONLY after
+	// confirming the keyboard is still up, which is what keeps it from navigating
+	// away (the side effect reported on the devicelab driver).
+
+	// If we can confirm the keyboard isn't shown, there's nothing to do.
+	if d.device != nil && !d.isKeyboardVisible() {
+		return successResult("Keyboard not visible", nil)
 	}
-	return successResult("Keyboard hidden", nil)
+
+	_ = d.client.HideKeyboard()
+	if d.waitKeyboardHidden() {
+		return successResult("Keyboard hidden", nil)
+	}
+
+	// Appium's call didn't take. Fall back to BACK, but only while the keyboard
+	// is still shown so we can't trigger a stray back-navigation.
+	if d.isKeyboardVisible() {
+		if err := d.client.PressKeyCode(uiautomator2.KeyCodeBack); err == nil && d.waitKeyboardHidden() {
+			return successResult("Keyboard hidden (via back key)", nil)
+		}
+	}
+
+	// Couldn't confirm dismissal — don't fail the step (the keyboard may already
+	// be gone on a device we can't inspect).
+	return successResult("Hide keyboard (dismissal not confirmed)", nil)
 }
 
 func (d *Driver) inputRandom(step *flow.InputRandomStep) *core.CommandResult {
