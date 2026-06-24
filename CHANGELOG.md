@@ -26,8 +26,12 @@ A reporter-driven correctness release. The headline theme is **tap and scroll ge
 - **CI hardening** — migrated the deprecated `nhooyr.io/websocket` to `github.com/coder/websocket` (drop-in), cleared `golangci-lint` findings (`errcheck`, `gosimple`, `staticcheck`), and stabilized the headless Chromium browser tests on GitHub runners (disable the setuid sandbox under CI). No user-facing behavior change.
 
 ### Contributors
-Thanks to everyone who reported issues that shaped this release:
-- [@MarioRial22](https://github.com/MarioRial22) — Android tap/scroll validation against physical display ([#100](https://github.com/devicelab-dev/maestro-runner/issues/100), [#101](https://github.com/devicelab-dev/maestro-runner/issues/101))
+Thanks to everyone who shaped this release.
+
+**Code contributions:**
+- [@MarioRial22](https://github.com/MarioRial22) — Android tap validation against the physical display ([#101](https://github.com/devicelab-dev/maestro-runner/pull/101), reported in [#100](https://github.com/devicelab-dev/maestro-runner/issues/100)), `scrollUntilVisible` malformed-rect rejection ([#103](https://github.com/devicelab-dev/maestro-runner/pull/103)), and CI lint + browser-test stabilization ([#104](https://github.com/devicelab-dev/maestro-runner/pull/104))
+
+**Reported by:**
 - [@George-Anton-Tarazi](https://github.com/George-Anton-Tarazi) — broken update banner install URL ([#102](https://github.com/devicelab-dev/maestro-runner/issues/102))
 - [@seanadkinson](https://github.com/seanadkinson) — iOS real-device permission dialogs from `onFlowStart`/`runFlow` ([#108](https://github.com/devicelab-dev/maestro-runner/issues/108))
 - [@satishs22](https://github.com/satishs22) — Android keyboard dismissal ([#42](https://github.com/devicelab-dev/maestro-runner/issues/42))
