@@ -58,6 +58,12 @@ func (se *ScriptEngine) SetVariables(vars map[string]string) {
 	}
 }
 
+// UnsetVariable removes a variable from both the Go map and the JS engine.
+func (se *ScriptEngine) UnsetVariable(name string) {
+	delete(se.variables, name)
+	se.js.UnsetVariable(name)
+}
+
 // ImportSystemEnv imports system environment variables into the script engine.
 // Only imports variables matching the pattern (uppercase with underscores).
 func (se *ScriptEngine) ImportSystemEnv() {
@@ -175,19 +181,24 @@ func (se *ScriptEngine) RunScript(script string, env map[string]string) error {
 	// Expand variables in script
 	script = se.ExpandVariables(script)
 
-	// Apply env variables, expanded so values like
-	// "mockoon-cli start --port ${output.port}" resolve before the script
-	// reads them — matching defineVariables / runFlow env and vanilla Maestro
-	// (#107). Previously these were set verbatim, leaking literal ${...} into
-	// the script.
-	for k, v := range env {
-		se.SetVariable(k, se.ExpandVariables(v))
-	}
+	// Apply env variables for the duration of THIS script only, expanded so
+	// values like "mockoon-cli start --port ${output.port}" resolve before the
+	// script reads them (#107). Scoped via save/restore so a value set here
+	// doesn't leak into later runScript calls — matching Maestro's per-script
+	// env scope (#109). restore() reverts each var to its prior value, or
+	// unsets it entirely if it didn't exist before this run.
+	restore := se.applyScopedEnv(env)
+	defer restore()
 
-	// Pre-define potential env variables as undefined to avoid ReferenceError.
-	// This matches Maestro's behavior where undefined variables are falsy rather than errors.
-	matches := envVarPattern.FindAllString(script, -1)
-	for _, name := range matches {
+	// Pre-define any referenced-but-undeclared identifier as undefined so the
+	// script can use optional env vars via `someVar || default` or
+	// `typeof someVar` without a ReferenceError — matching Maestro, where
+	// undeclared variables evaluate to undefined rather than throwing (#109).
+	// DefineUndefinedIfMissing is conservative (it skips real globals/builtins
+	// and already-defined vars), and a local declaration in the script shadows
+	// the predefined undefined, so this can't clobber the script's own
+	// functions or variables.
+	for _, name := range referencedIdentifiers(script) {
 		se.js.DefineUndefinedIfMissing(name)
 	}
 
@@ -201,6 +212,72 @@ func (se *ScriptEngine) RunScript(script string, env map[string]string) error {
 	// Sync output back to variables
 	se.SyncOutputToVariables()
 	return nil
+}
+
+// applyScopedEnv sets env vars (with their values variable-expanded) for one
+// script run and returns a restore func. Each var is reverted to its prior
+// value afterward — or unset if it had none — so runScript env never persists
+// into a subsequent script.
+func (se *ScriptEngine) applyScopedEnv(env map[string]string) func() {
+	type prev struct {
+		val     string
+		existed bool
+	}
+	saved := make(map[string]prev, len(env))
+	for k := range env {
+		v, ok := se.variables[k]
+		saved[k] = prev{val: v, existed: ok}
+	}
+	for k, v := range env {
+		se.SetVariable(k, se.ExpandVariables(v))
+	}
+	return func() {
+		for k, p := range saved {
+			if p.existed {
+				se.SetVariable(k, p.val)
+			} else {
+				se.UnsetVariable(k)
+			}
+		}
+	}
+}
+
+// jsIdentifierPattern matches JavaScript identifiers. The scan is deliberately
+// liberal (it also matches property names and tokens inside strings) — that's
+// harmless because DefineUndefinedIfMissing only ever defines names that aren't
+// already real globals or declared variables.
+var jsIdentifierPattern = regexp.MustCompile(`[A-Za-z_$][A-Za-z0-9_$]*`)
+
+// jsHardKeywords are reserved words that can never be a variable reference, so
+// there's no point predefining them. Contextual keywords that ARE valid
+// identifiers (async, await, let, of, yield, from, …) are intentionally NOT
+// here — e.g. a script may use `async` as an optional env var name.
+var jsHardKeywords = map[string]bool{
+	"var": true, "const": true, "function": true, "return": true,
+	"if": true, "else": true, "for": true, "while": true, "do": true,
+	"switch": true, "case": true, "default": true, "break": true,
+	"continue": true, "new": true, "delete": true, "typeof": true,
+	"instanceof": true, "in": true, "void": true, "this": true,
+	"true": true, "false": true, "null": true, "undefined": true,
+	"try": true, "catch": true, "finally": true, "throw": true,
+	"class": true, "extends": true, "super": true, "import": true,
+	"export": true,
+}
+
+// referencedIdentifiers returns the distinct identifier-like tokens in a script
+// worth predefining as undefined (keywords removed). See RunScript for why
+// over-matching here is safe.
+func referencedIdentifiers(script string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, name := range jsIdentifierPattern.FindAllString(script, -1) {
+		if jsHardKeywords[name] || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
 }
 
 // EvalCondition evaluates a script condition and returns true/false.
