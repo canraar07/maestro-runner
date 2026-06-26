@@ -229,6 +229,66 @@ func TestScriptEngine_RunScript_Error(t *testing.T) {
 	}
 }
 
+// --- Regression tests for issue #110: fast when/while condition checks ---
+
+// captureVisibleTimeout runs a `when: visible:` check through CheckCondition and
+// returns the TimeoutMs the engine handed the driver for the visibility lookup.
+func captureVisibleTimeout(t *testing.T, se *ScriptEngine, cond flow.Condition) int {
+	t.Helper()
+	got := -1
+	driver := &mockDriver{
+		executeFunc: func(step flow.Step) *core.CommandResult {
+			if vs, ok := step.(*flow.AssertVisibleStep); ok {
+				got = vs.TimeoutMs
+			}
+			return &core.CommandResult{Success: false} // not visible → condition false
+		},
+	}
+	se.CheckCondition(context.Background(), cond, driver)
+	return got
+}
+
+// TestCheckCondition_FastDefaultTimeout reproduces #110: an unmet `when:`
+// condition must use the short default, not the driver's 7s optional-find
+// timeout (passing 0 would defer to that).
+func TestCheckCondition_FastDefaultTimeout(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	got := captureVisibleTimeout(t, se, flow.Condition{Visible: &flow.Selector{Text: "Nope"}})
+	if got != defaultConditionTimeoutMs {
+		t.Errorf("when-condition timeout = %d, want fast default %d (0 would defer to the 7s optional-find timeout)", got, defaultConditionTimeoutMs)
+	}
+}
+
+// TestCheckCondition_PerConditionTimeoutWins verifies an explicit per-condition
+// timeout still overrides the default.
+func TestCheckCondition_PerConditionTimeoutWins(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	got := captureVisibleTimeout(t, se, flow.Condition{Visible: &flow.Selector{Text: "Nope"}, Timeout: 250})
+	if got != 250 {
+		t.Errorf("per-condition timeout = %d, want 250", got)
+	}
+}
+
+// TestSetConditionTimeout verifies the global override and that a non-positive
+// value is ignored (keeps the existing default).
+func TestSetConditionTimeout(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	se.SetConditionTimeout(2500)
+	if got := captureVisibleTimeout(t, se, flow.Condition{Visible: &flow.Selector{Text: "Nope"}}); got != 2500 {
+		t.Errorf("after SetConditionTimeout(2500), timeout = %d, want 2500", got)
+	}
+	se.SetConditionTimeout(0) // ignored
+	if got := captureVisibleTimeout(t, se, flow.Condition{Visible: &flow.Selector{Text: "Nope"}}); got != 2500 {
+		t.Errorf("SetConditionTimeout(0) should be ignored; timeout = %d, want 2500", got)
+	}
+}
+
 // --- Regression tests for issue #109: script env behavior vs Maestro ---
 
 // TestScriptEngine_RunScript_EnvDoesNotLeak reproduces #109: an env var set on

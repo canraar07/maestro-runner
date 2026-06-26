@@ -18,18 +18,40 @@ import (
 // envVarPattern matches ALL_CAPS identifiers that look like env variables
 var envVarPattern = regexp.MustCompile(`\b([A-Z][A-Z0-9_]{2,})\b`)
 
+// defaultConditionTimeoutMs is the budget for a `when:`/`while:` condition's
+// visible/notVisible check when the condition (or its selector) sets no explicit
+// timeout. It is deliberately short: a condition that isn't met should resolve
+// quickly rather than blocking on the 7s optional-find timeout. Vanilla Maestro
+// is effectively fast here too (it shrinks the budget by time already elapsed
+// since the last interaction). A present element still resolves immediately;
+// this only bounds how long an unmet condition waits. Tunable via
+// SetConditionTimeout / the --condition-timeout flag, and overridable per
+// condition with `timeout:`. (#110)
+const defaultConditionTimeoutMs = 1000
+
 // ScriptEngine handles JavaScript execution and variable management.
 type ScriptEngine struct {
-	js        *jsengine.Engine
-	variables map[string]string
-	flowDir   string // Directory of current flow (for resolving relative paths)
+	js                 *jsengine.Engine
+	variables          map[string]string
+	flowDir            string // Directory of current flow (for resolving relative paths)
+	conditionTimeoutMs int    // default timeout for when/while condition checks
 }
 
 // NewScriptEngine creates a new script engine.
 func NewScriptEngine() *ScriptEngine {
 	return &ScriptEngine{
-		js:        jsengine.New(),
-		variables: make(map[string]string),
+		js:                 jsengine.New(),
+		variables:          make(map[string]string),
+		conditionTimeoutMs: defaultConditionTimeoutMs,
+	}
+}
+
+// SetConditionTimeout overrides the default timeout (ms) used for `when:`/
+// `while:` condition checks that don't specify their own. A non-positive value
+// is ignored (keeps the current default).
+func (se *ScriptEngine) SetConditionTimeout(ms int) {
+	if ms > 0 {
+		se.conditionTimeoutMs = ms
 	}
 }
 
@@ -461,7 +483,8 @@ func (se *ScriptEngine) ExecuteAssertCondition(ctx context.Context, step *flow.A
 	// Check visible condition
 	if cond.Visible != nil {
 		visibleStep := &flow.AssertVisibleStep{Selector: *cond.Visible}
-		visibleStep.TimeoutMs = conditionTimeout(cond, cond.Visible)
+		// Assertion: keep the driver's full optional-find wait (fallback 0).
+		visibleStep.TimeoutMs = conditionTimeout(cond, cond.Visible, 0)
 		result := driver.Execute(visibleStep)
 		if !result.Success {
 			return &core.CommandResult{
@@ -475,7 +498,7 @@ func (se *ScriptEngine) ExecuteAssertCondition(ctx context.Context, step *flow.A
 	// Check notVisible condition
 	if cond.NotVisible != nil {
 		notVisibleStep := &flow.AssertNotVisibleStep{Selector: *cond.NotVisible}
-		notVisibleStep.TimeoutMs = conditionTimeout(cond, cond.NotVisible)
+		notVisibleStep.TimeoutMs = conditionTimeout(cond, cond.NotVisible, 0)
 		result := driver.Execute(notVisibleStep)
 		if !result.Success {
 			return &core.CommandResult{
@@ -525,7 +548,8 @@ func (se *ScriptEngine) CheckCondition(ctx context.Context, cond flow.Condition,
 	// Check visible
 	if cond.Visible != nil {
 		visibleStep := &flow.AssertVisibleStep{Selector: *cond.Visible}
-		visibleStep.TimeoutMs = conditionTimeout(cond, cond.Visible)
+		// when/while: an unmet condition should fail fast (#110).
+		visibleStep.TimeoutMs = conditionTimeout(cond, cond.Visible, se.conditionTimeoutMs)
 		visibleStep.Optional = true
 		result := driver.Execute(visibleStep)
 		if !result.Success {
@@ -536,7 +560,7 @@ func (se *ScriptEngine) CheckCondition(ctx context.Context, cond flow.Condition,
 	// Check notVisible
 	if cond.NotVisible != nil {
 		notVisibleStep := &flow.AssertNotVisibleStep{Selector: *cond.NotVisible}
-		notVisibleStep.TimeoutMs = conditionTimeout(cond, cond.NotVisible)
+		notVisibleStep.TimeoutMs = conditionTimeout(cond, cond.NotVisible, se.conditionTimeoutMs)
 		notVisibleStep.Optional = true
 		result := driver.Execute(notVisibleStep)
 		if !result.Success {
@@ -556,15 +580,19 @@ func (se *ScriptEngine) CheckCondition(ctx context.Context, cond flow.Condition,
 }
 
 // conditionTimeout returns the timeout to use for a condition check.
-// Priority: 1) Condition.Timeout, 2) Selector.Timeout, 3) 0 (driver uses OptionalFindTimeout)
-func conditionTimeout(cond flow.Condition, sel *flow.Selector) int {
+// Priority: 1) Condition.Timeout, 2) Selector.Timeout, 3) the caller's fallback.
+// A fallback of 0 lets the driver apply its OptionalFindTimeout (7s) — used for
+// assertCondition, where an asserted element should be waited for. The when/
+// while path passes the short conditionTimeoutMs so an unmet condition fails
+// fast instead of blocking 7s (#110).
+func conditionTimeout(cond flow.Condition, sel *flow.Selector, fallback int) int {
 	if cond.Timeout > 0 {
 		return cond.Timeout
 	}
 	if sel != nil && sel.Timeout > 0 {
 		return sel.Timeout
 	}
-	return 0 // Optional=true on the step means driver uses OptionalFindTimeout (7s)
+	return fallback
 }
 
 // withEnvVars applies environment variables and returns a restore function.
