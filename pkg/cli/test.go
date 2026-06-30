@@ -468,7 +468,7 @@ type RunConfig struct {
 	Parallel int // Number of devices to use (0 = single device mode)
 
 	// Execution
-	Continuous bool
+	Continuous  bool
 	Headed      bool   // Show browser window (web only, default is headless)
 	Browser     string // chrome, chromium, or path to binary (web only)
 	UserDataDir string // Persistent Chrome profile directory (web only)
@@ -481,15 +481,15 @@ type RunConfig struct {
 	AppID    string // App bundle ID or package name
 
 	// Driver
-	Driver       string                 // uiautomator2, appium
-	AppiumURL    string                 // Appium server URL
+	Driver    string // uiautomator2, appium
+	AppiumURL string // Appium server URL
 	// AppiumSessionFile, when set, makes maestro-runner publish live Appium
 	// session info (sessionId + appiumUrl per device) to this JSON file via the
 	// session-export provider, so external tools can attach without polling
 	// reports. Runs alongside any detected cloud provider. See issue #91.
 	AppiumSessionFile string
 	CapsFile          string                 // Appium capabilities JSON file path
-	Capabilities map[string]interface{} // Parsed Appium capabilities
+	Capabilities      map[string]interface{} // Parsed Appium capabilities
 
 	// Driver settings
 	WaitForIdleTimeout int    // Wait for device idle in ms (0 = disabled, default 200)
@@ -834,9 +834,7 @@ func executeTest(cfg *RunConfig) error {
 	// Appium handles everything via capabilities — no --app-file or --team-id needed.
 	if strings.EqualFold(cfg.Platform, "ios") && cfg.Driver != "appium" {
 		// team-id is only required for real devices, not simulators.
-		isSimTarget := cfg.StartSimulator != "" ||
-			(len(cfg.Devices) > 0 && isIOSSimulator(cfg.Devices[0])) ||
-			(len(cfg.Devices) == 0 && hasBootedSimulator())
+		isSimTarget := iosTargetsSimulator(cfg)
 		if cfg.TeamID == "" && !isSimTarget {
 			return fmt.Errorf("iOS with WDA driver requires --team-id for code signing (real devices only)\n" +
 				"Usage: maestro-runner --platform ios --team-id <APPLE_TEAM_ID> test <flow-files>\n" +
