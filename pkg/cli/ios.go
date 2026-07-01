@@ -207,6 +207,25 @@ func findIOSDevice() (string, error) {
 	return "", fmt.Errorf("no iOS device found (no booted simulator or connected physical device)")
 }
 
+// iosTargetsSimulator reports whether an iOS WDA run will target a simulator
+// rather than a real device, so --team-id (code signing) and --app-file aren't
+// required. --auto-start-emulator and --start-simulator both imply simulators
+// (you can't auto-create a real device), and crucially this is evaluated before
+// any simulator is booted — so it must not depend on hasBootedSimulator() in
+// those cases, which is the bug behind --auto-start-emulator erroring for
+// simulators (#111). Otherwise fall back to the named device, or a
+// currently-booted simulator.
+func iosTargetsSimulator(cfg *RunConfig) bool {
+	switch {
+	case cfg.AutoStartEmulator, cfg.StartSimulator != "":
+		return true
+	case len(cfg.Devices) > 0:
+		return isIOSSimulator(cfg.Devices[0])
+	default:
+		return hasBootedSimulator()
+	}
+}
+
 // hasBootedSimulator returns true if any iOS simulator is currently booted.
 func hasBootedSimulator() bool {
 	_, err := findBootedSimulator()

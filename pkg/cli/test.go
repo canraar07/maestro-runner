@@ -842,9 +842,7 @@ func executeTest(cfg *RunConfig) error {
 	// Appium handles everything via capabilities — no --app-file or --team-id needed.
 	if strings.EqualFold(cfg.Platform, "ios") && cfg.Driver != "appium" {
 		// team-id is only required for real devices, not simulators.
-		isSimTarget := cfg.StartSimulator != "" ||
-			(len(cfg.Devices) > 0 && isIOSSimulator(cfg.Devices[0])) ||
-			(len(cfg.Devices) == 0 && hasBootedSimulator())
+		isSimTarget := iosTargetsSimulator(cfg)
 		if cfg.TeamID == "" && !isSimTarget {
 			return fmt.Errorf("iOS with WDA driver requires --team-id for code signing (real devices only)\n" +
 				"Usage: maestro-runner --platform ios --team-id <APPLE_TEAM_ID> test <flow-files>\n" +
