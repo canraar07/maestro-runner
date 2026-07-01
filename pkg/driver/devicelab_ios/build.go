@@ -3,10 +3,14 @@ package devicelab_ios
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/config"
@@ -19,17 +23,70 @@ func GetRunnerSourcePath() string {
 	return filepath.Join(config.GetDriversDir("ios"), "DevicelabIOSRunner")
 }
 
-// GetRunnerBuildCacheDir returns the cache directory for build artifacts
-// keyed by simulator iOS version. Different iOS versions produce different
-// .xctestrun files (linker output references the SDK version), so each gets
-// its own cache slot. Mirrors the WDA cache-by-sim-version pattern.
+// GetRunnerBuildCacheDir returns the cache directory for build artifacts,
+// keyed by both the simulator iOS version AND a content hash of the vendored
+// runner source. The iOS version matters because different SDK versions
+// produce different .xctestrun output; the source hash matters because a new
+// maestro-runner release can ship updated runner Swift into the SAME iOS-version
+// slot — keying on version alone would serve a stale build for the changed
+// runner (and conversely rebuild needlessly across releases that don't touch
+// it). Hashing the ~300K source tree is sub-millisecond.
 func GetRunnerBuildCacheDir(simulatorUDID string) (string, error) {
 	iosVersion, err := simulatorOSVersion(simulatorUDID)
 	if err != nil {
 		return "", err
 	}
-	configName := fmt.Sprintf("sim-ios%s", iosVersion)
+	srcHash, err := runnerSourceHash(GetRunnerSourcePath())
+	if err != nil {
+		return "", fmt.Errorf("hash runner source: %w", err)
+	}
+	configName := fmt.Sprintf("sim-ios%s-%s", iosVersion, srcHash)
 	return filepath.Join(config.GetCacheDir(), "devicelab-ios-runner-builds", configName), nil
+}
+
+// runnerSourceHash returns a short, stable content hash of the vendored runner
+// source tree at sourcePath, so the build cache invalidates exactly when the
+// bundled Swift/Obj-C/project files change and is reused otherwise. Build noise
+// (Xcode user state / derived data) is excluded so it never perturbs the hash.
+func runnerSourceHash(sourcePath string) (string, error) {
+	var files []string
+	err := filepath.WalkDir(sourcePath, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "xcuserdata", "build", "DerivedData", ".git":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		files = append(files, p)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(files) // stable order regardless of filesystem walk order
+
+	h := sha256.New()
+	for _, p := range files {
+		rel, err := filepath.Rel(sourcePath, p)
+		if err != nil {
+			return "", err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return "", err
+		}
+		// Mix in the relative path so a rename changes the hash, with NUL
+		// separators so path/content boundaries can't be ambiguous.
+		_, _ = h.Write([]byte(rel))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(data)
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12], nil
 }
 
 // EnsureBuilt returns the artifacts directory for the given simulator,
@@ -81,11 +138,16 @@ func EnsureBuilt(ctx context.Context, simulatorUDID string) (string, error) {
 	buildCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
+	// Target the concrete booted simulator rather than
+	// "generic/platform=iOS Simulator". A generic destination makes xcodebuild
+	// resolve and plan against an abstract device on every cold build; pinning
+	// the exact UDID we'll run on skips that re-planning and matches the cache
+	// key (which is already iOS-version specific).
 	args := []string{
 		"build-for-testing",
 		"-project", projectPath,
 		"-scheme", "DevicelabIOSRunnerUITests",
-		"-destination", "generic/platform=iOS Simulator",
+		"-destination", fmt.Sprintf("platform=iOS Simulator,id=%s", simulatorUDID),
 		"-derivedDataPath", cacheDir,
 		"COMPILER_INDEX_STORE_ENABLE=NO",
 		"ENABLE_CODE_COVERAGE=NO",
