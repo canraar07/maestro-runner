@@ -599,25 +599,21 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 		direction = "up"
 	}
 
-	uiaDir := mapDirection(direction)
-
-	// If selector specified, swipe within that element's bounds
+	// If selector specified, derive swipe coordinates from the element's
+	// bounds and route through the same ADB `input swipe` path used by
+	// screen-percentage swipes. `SwipeInArea` (the previous path) does not
+	// honor `step.Duration`, producing a fast flick — sufficient for scroll
+	// containers but too fast for native drag targets (Compose sliders,
+	// custom drag-handlers), which discard the gesture. Using the ADB path
+	// with an element-derived start/end matches classic Maestro's semantics.
 	if step.Selector != nil && !step.Selector.IsEmpty() {
 		_, info, err := d.findElement(*step.Selector, step.IsOptional(), step.TimeoutMs)
 		if err != nil {
 			return errorResult(err, fmt.Sprintf("Element not found for swipe: %v", err))
 		}
 		if info != nil && info.Bounds.Width > 0 {
-			area := uiautomator2.NewRect(
-				info.Bounds.X,
-				info.Bounds.Y,
-				info.Bounds.Width,
-				info.Bounds.Height,
-			)
-			if err := d.client.SwipeInArea(area, uiaDir, 0.7, 0); err != nil {
-				return errorResult(err, fmt.Sprintf("Failed to swipe in element: %v", err))
-			}
-			return successResult(fmt.Sprintf("Swiped %s in element", direction), info)
+			startX, startY, endX, endY := swipeCoordsInBounds(direction, info.Bounds)
+			return d.swipeWithAbsoluteCoords(startX, startY, endX, endY, step.Duration)
 		}
 	}
 
@@ -627,6 +623,43 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 		return errorResult(err, "Failed to get screen size")
 	}
 	return d.swipeWithMaestroCoordinates(direction, width, height, step.Duration)
+}
+
+// swipeCoordsInBounds returns absolute start/end coordinates for a
+// direction-based swipe anchored on an element. The swipe starts inside
+// the element (so the touch is captured by that element) and ends past
+// the opposite edge (so drag-based targets like native sliders reach
+// their extreme value). This matches classic Maestro's semantics on the
+// two common use cases:
+//   - scroll containers: touch starts inside and moves outward, scrolling
+//     the container by the drag distance
+//   - drag targets (sliders, drag handles): the release position past
+//     the edge pins the drag target to its extreme in that direction
+//
+// Negative coordinates are clamped to 0 (screen origin) so `adb input
+// swipe` receives on-screen coordinates even for elements flush against
+// a screen edge.
+func swipeCoordsInBounds(direction string, b core.Bounds) (startX, startY, endX, endY int) {
+	clamp := func(v int) int {
+		if v < 0 {
+			return 0
+		}
+		return v
+	}
+	pctX := func(p int) int { return clamp(b.X + b.Width*p/100) }
+	pctY := func(p int) int { return clamp(b.Y + b.Height*p/100) }
+	switch direction {
+	case "up":
+		return pctX(50), pctY(90), pctX(50), pctY(-10)
+	case "down":
+		return pctX(50), pctY(10), pctX(50), pctY(110)
+	case "left":
+		return pctX(90), pctY(50), pctX(-10), pctY(50)
+	case "right":
+		return pctX(10), pctY(50), pctX(110), pctY(50)
+	default:
+		return pctX(50), pctY(50), pctX(50), pctY(0)
+	}
 }
 
 // findScrollableElement waits for and finds a scrollable element.
