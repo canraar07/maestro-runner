@@ -18,18 +18,40 @@ import (
 // envVarPattern matches ALL_CAPS identifiers that look like env variables
 var envVarPattern = regexp.MustCompile(`\b([A-Z][A-Z0-9_]{2,})\b`)
 
+// defaultConditionTimeoutMs is the budget for a `when:`/`while:` condition's
+// visible/notVisible check when the condition (or its selector) sets no explicit
+// timeout. It is deliberately short: a condition that isn't met should resolve
+// quickly rather than blocking on the 7s optional-find timeout. Vanilla Maestro
+// is effectively fast here too (it shrinks the budget by time already elapsed
+// since the last interaction). A present element still resolves immediately;
+// this only bounds how long an unmet condition waits. Tunable via
+// SetConditionTimeout / the --condition-timeout flag, and overridable per
+// condition with `timeout:`. (#110)
+const defaultConditionTimeoutMs = 1000
+
 // ScriptEngine handles JavaScript execution and variable management.
 type ScriptEngine struct {
-	js        *jsengine.Engine
-	variables map[string]string
-	flowDir   string // Directory of current flow (for resolving relative paths)
+	js                 *jsengine.Engine
+	variables          map[string]string
+	flowDir            string // Directory of current flow (for resolving relative paths)
+	conditionTimeoutMs int    // default timeout for when/while condition checks
 }
 
 // NewScriptEngine creates a new script engine.
 func NewScriptEngine() *ScriptEngine {
 	return &ScriptEngine{
-		js:        jsengine.New(),
-		variables: make(map[string]string),
+		js:                 jsengine.New(),
+		variables:          make(map[string]string),
+		conditionTimeoutMs: defaultConditionTimeoutMs,
+	}
+}
+
+// SetConditionTimeout overrides the default timeout (ms) used for `when:`/
+// `while:` condition checks that don't specify their own. A non-positive value
+// is ignored (keeps the current default).
+func (se *ScriptEngine) SetConditionTimeout(ms int) {
+	if ms > 0 {
+		se.conditionTimeoutMs = ms
 	}
 }
 
@@ -56,6 +78,12 @@ func (se *ScriptEngine) SetVariables(vars map[string]string) {
 	for k, v := range vars {
 		se.SetVariable(k, v)
 	}
+}
+
+// UnsetVariable removes a variable from both the Go map and the JS engine.
+func (se *ScriptEngine) UnsetVariable(name string) {
+	delete(se.variables, name)
+	se.js.UnsetVariable(name)
 }
 
 // ImportSystemEnv imports system environment variables into the script engine.
@@ -175,19 +203,24 @@ func (se *ScriptEngine) RunScript(script string, env map[string]string) error {
 	// Expand variables in script
 	script = se.ExpandVariables(script)
 
-	// Apply env variables, expanded so values like
-	// "mockoon-cli start --port ${output.port}" resolve before the script
-	// reads them — matching defineVariables / runFlow env and vanilla Maestro
-	// (#107). Previously these were set verbatim, leaking literal ${...} into
-	// the script.
-	for k, v := range env {
-		se.SetVariable(k, se.ExpandVariables(v))
-	}
+	// Apply env variables for the duration of THIS script only, expanded so
+	// values like "mockoon-cli start --port ${output.port}" resolve before the
+	// script reads them (#107). Scoped via save/restore so a value set here
+	// doesn't leak into later runScript calls — matching Maestro's per-script
+	// env scope (#109). restore() reverts each var to its prior value, or
+	// unsets it entirely if it didn't exist before this run.
+	restore := se.applyScopedEnv(env)
+	defer restore()
 
-	// Pre-define potential env variables as undefined to avoid ReferenceError.
-	// This matches Maestro's behavior where undefined variables are falsy rather than errors.
-	matches := envVarPattern.FindAllString(script, -1)
-	for _, name := range matches {
+	// Pre-define any referenced-but-undeclared identifier as undefined so the
+	// script can use optional env vars via `someVar || default` or
+	// `typeof someVar` without a ReferenceError — matching Maestro, where
+	// undeclared variables evaluate to undefined rather than throwing (#109).
+	// DefineUndefinedIfMissing is conservative (it skips real globals/builtins
+	// and already-defined vars), and a local declaration in the script shadows
+	// the predefined undefined, so this can't clobber the script's own
+	// functions or variables.
+	for _, name := range referencedIdentifiers(script) {
 		se.js.DefineUndefinedIfMissing(name)
 	}
 
@@ -201,6 +234,72 @@ func (se *ScriptEngine) RunScript(script string, env map[string]string) error {
 	// Sync output back to variables
 	se.SyncOutputToVariables()
 	return nil
+}
+
+// applyScopedEnv sets env vars (with their values variable-expanded) for one
+// script run and returns a restore func. Each var is reverted to its prior
+// value afterward — or unset if it had none — so runScript env never persists
+// into a subsequent script.
+func (se *ScriptEngine) applyScopedEnv(env map[string]string) func() {
+	type prev struct {
+		val     string
+		existed bool
+	}
+	saved := make(map[string]prev, len(env))
+	for k := range env {
+		v, ok := se.variables[k]
+		saved[k] = prev{val: v, existed: ok}
+	}
+	for k, v := range env {
+		se.SetVariable(k, se.ExpandVariables(v))
+	}
+	return func() {
+		for k, p := range saved {
+			if p.existed {
+				se.SetVariable(k, p.val)
+			} else {
+				se.UnsetVariable(k)
+			}
+		}
+	}
+}
+
+// jsIdentifierPattern matches JavaScript identifiers. The scan is deliberately
+// liberal (it also matches property names and tokens inside strings) — that's
+// harmless because DefineUndefinedIfMissing only ever defines names that aren't
+// already real globals or declared variables.
+var jsIdentifierPattern = regexp.MustCompile(`[A-Za-z_$][A-Za-z0-9_$]*`)
+
+// jsHardKeywords are reserved words that can never be a variable reference, so
+// there's no point predefining them. Contextual keywords that ARE valid
+// identifiers (async, await, let, of, yield, from, …) are intentionally NOT
+// here — e.g. a script may use `async` as an optional env var name.
+var jsHardKeywords = map[string]bool{
+	"var": true, "const": true, "function": true, "return": true,
+	"if": true, "else": true, "for": true, "while": true, "do": true,
+	"switch": true, "case": true, "default": true, "break": true,
+	"continue": true, "new": true, "delete": true, "typeof": true,
+	"instanceof": true, "in": true, "void": true, "this": true,
+	"true": true, "false": true, "null": true, "undefined": true,
+	"try": true, "catch": true, "finally": true, "throw": true,
+	"class": true, "extends": true, "super": true, "import": true,
+	"export": true,
+}
+
+// referencedIdentifiers returns the distinct identifier-like tokens in a script
+// worth predefining as undefined (keywords removed). See RunScript for why
+// over-matching here is safe.
+func referencedIdentifiers(script string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, name := range jsIdentifierPattern.FindAllString(script, -1) {
+		if jsHardKeywords[name] || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
 }
 
 // EvalCondition evaluates a script condition and returns true/false.
@@ -384,7 +483,8 @@ func (se *ScriptEngine) ExecuteAssertCondition(ctx context.Context, step *flow.A
 	// Check visible condition
 	if cond.Visible != nil {
 		visibleStep := &flow.AssertVisibleStep{Selector: *cond.Visible}
-		visibleStep.TimeoutMs = conditionTimeout(cond, cond.Visible)
+		// Assertion: keep the driver's full optional-find wait (fallback 0).
+		visibleStep.TimeoutMs = conditionTimeout(cond, cond.Visible, 0)
 		result := driver.Execute(visibleStep)
 		if !result.Success {
 			return &core.CommandResult{
@@ -398,7 +498,7 @@ func (se *ScriptEngine) ExecuteAssertCondition(ctx context.Context, step *flow.A
 	// Check notVisible condition
 	if cond.NotVisible != nil {
 		notVisibleStep := &flow.AssertNotVisibleStep{Selector: *cond.NotVisible}
-		notVisibleStep.TimeoutMs = conditionTimeout(cond, cond.NotVisible)
+		notVisibleStep.TimeoutMs = conditionTimeout(cond, cond.NotVisible, 0)
 		result := driver.Execute(notVisibleStep)
 		if !result.Success {
 			return &core.CommandResult{
@@ -448,7 +548,8 @@ func (se *ScriptEngine) CheckCondition(ctx context.Context, cond flow.Condition,
 	// Check visible
 	if cond.Visible != nil {
 		visibleStep := &flow.AssertVisibleStep{Selector: *cond.Visible}
-		visibleStep.TimeoutMs = conditionTimeout(cond, cond.Visible)
+		// when/while: an unmet condition should fail fast (#110).
+		visibleStep.TimeoutMs = conditionTimeout(cond, cond.Visible, se.conditionTimeoutMs)
 		visibleStep.Optional = true
 		result := driver.Execute(visibleStep)
 		if !result.Success {
@@ -459,7 +560,7 @@ func (se *ScriptEngine) CheckCondition(ctx context.Context, cond flow.Condition,
 	// Check notVisible
 	if cond.NotVisible != nil {
 		notVisibleStep := &flow.AssertNotVisibleStep{Selector: *cond.NotVisible}
-		notVisibleStep.TimeoutMs = conditionTimeout(cond, cond.NotVisible)
+		notVisibleStep.TimeoutMs = conditionTimeout(cond, cond.NotVisible, se.conditionTimeoutMs)
 		notVisibleStep.Optional = true
 		result := driver.Execute(notVisibleStep)
 		if !result.Success {
@@ -479,15 +580,19 @@ func (se *ScriptEngine) CheckCondition(ctx context.Context, cond flow.Condition,
 }
 
 // conditionTimeout returns the timeout to use for a condition check.
-// Priority: 1) Condition.Timeout, 2) Selector.Timeout, 3) 0 (driver uses OptionalFindTimeout)
-func conditionTimeout(cond flow.Condition, sel *flow.Selector) int {
+// Priority: 1) Condition.Timeout, 2) Selector.Timeout, 3) the caller's fallback.
+// A fallback of 0 lets the driver apply its OptionalFindTimeout (7s) — used for
+// assertCondition, where an asserted element should be waited for. The when/
+// while path passes the short conditionTimeoutMs so an unmet condition fails
+// fast instead of blocking 7s (#110).
+func conditionTimeout(cond flow.Condition, sel *flow.Selector, fallback int) int {
 	if cond.Timeout > 0 {
 		return cond.Timeout
 	}
 	if sel != nil && sel.Timeout > 0 {
 		return sel.Timeout
 	}
-	return 0 // Optional=true on the step means driver uses OptionalFindTimeout (7s)
+	return fallback
 }
 
 // withEnvVars applies environment variables and returns a restore function.

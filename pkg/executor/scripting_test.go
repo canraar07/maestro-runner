@@ -229,6 +229,157 @@ func TestScriptEngine_RunScript_Error(t *testing.T) {
 	}
 }
 
+// --- Regression tests for issue #110: fast when/while condition checks ---
+
+// captureVisibleTimeout runs a `when: visible:` check through CheckCondition and
+// returns the TimeoutMs the engine handed the driver for the visibility lookup.
+func captureVisibleTimeout(t *testing.T, se *ScriptEngine, cond flow.Condition) int {
+	t.Helper()
+	got := -1
+	driver := &mockDriver{
+		executeFunc: func(step flow.Step) *core.CommandResult {
+			if vs, ok := step.(*flow.AssertVisibleStep); ok {
+				got = vs.TimeoutMs
+			}
+			return &core.CommandResult{Success: false} // not visible → condition false
+		},
+	}
+	se.CheckCondition(context.Background(), cond, driver)
+	return got
+}
+
+// TestCheckCondition_FastDefaultTimeout reproduces #110: an unmet `when:`
+// condition must use the short default, not the driver's 7s optional-find
+// timeout (passing 0 would defer to that).
+func TestCheckCondition_FastDefaultTimeout(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	got := captureVisibleTimeout(t, se, flow.Condition{Visible: &flow.Selector{Text: "Nope"}})
+	if got != defaultConditionTimeoutMs {
+		t.Errorf("when-condition timeout = %d, want fast default %d (0 would defer to the 7s optional-find timeout)", got, defaultConditionTimeoutMs)
+	}
+}
+
+// TestCheckCondition_PerConditionTimeoutWins verifies an explicit per-condition
+// timeout still overrides the default.
+func TestCheckCondition_PerConditionTimeoutWins(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	got := captureVisibleTimeout(t, se, flow.Condition{Visible: &flow.Selector{Text: "Nope"}, Timeout: 250})
+	if got != 250 {
+		t.Errorf("per-condition timeout = %d, want 250", got)
+	}
+}
+
+// TestSetConditionTimeout verifies the global override and that a non-positive
+// value is ignored (keeps the existing default).
+func TestSetConditionTimeout(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	se.SetConditionTimeout(2500)
+	if got := captureVisibleTimeout(t, se, flow.Condition{Visible: &flow.Selector{Text: "Nope"}}); got != 2500 {
+		t.Errorf("after SetConditionTimeout(2500), timeout = %d, want 2500", got)
+	}
+	se.SetConditionTimeout(0) // ignored
+	if got := captureVisibleTimeout(t, se, flow.Condition{Visible: &flow.Selector{Text: "Nope"}}); got != 2500 {
+		t.Errorf("SetConditionTimeout(0) should be ignored; timeout = %d, want 2500", got)
+	}
+}
+
+// --- Regression tests for issue #109: script env behavior vs Maestro ---
+
+// TestScriptEngine_RunScript_EnvDoesNotLeak reproduces #109: an env var set on
+// one runScript must NOT persist into the next runScript (Maestro gives each
+// script a fresh env scope). Before the fix, env was set as a sticky global.
+func TestScriptEngine_RunScript_EnvDoesNotLeak(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	// First script provides returnValue via env.
+	if err := se.RunScript("output.first = returnValue", map[string]string{
+		"returnValue": "mock_port",
+	}); err != nil {
+		t.Fatalf("first RunScript: %v", err)
+	}
+	if got := se.GetVariable("first"); got != "mock_port" {
+		t.Fatalf("first = %q, want %q", got, "mock_port")
+	}
+
+	// Second script does NOT provide returnValue. It must read as undefined,
+	// not the leaked "mock_port" from the previous run.
+	if err := se.RunScript(
+		`output.second = (typeof returnValue === 'undefined') ? "GONE" : returnValue`, nil,
+	); err != nil {
+		t.Fatalf("second RunScript: %v", err)
+	}
+	if got := se.GetVariable("second"); got != "GONE" {
+		t.Errorf("returnValue leaked across runScript calls: second = %q, want %q", got, "GONE")
+	}
+}
+
+// TestScriptEngine_RunScript_EnvRestoresPriorValue ensures a pre-existing
+// variable shadowed by a runScript env value is restored afterward, not unset.
+func TestScriptEngine_RunScript_EnvRestoresPriorValue(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	se.SetVariable("TOKEN", "original")
+	if err := se.RunScript("output.seen = TOKEN", map[string]string{"TOKEN": "override"}); err != nil {
+		t.Fatalf("RunScript: %v", err)
+	}
+	if got := se.GetVariable("seen"); got != "override" {
+		t.Errorf("inside script TOKEN = %q, want %q", got, "override")
+	}
+	if got := se.GetVariable("TOKEN"); got != "original" {
+		t.Errorf("after script TOKEN = %q, want restored %q", got, "original")
+	}
+}
+
+// TestScriptEngine_RunScript_UndeclaredEnvIsUndefined reproduces #109: a script
+// reusable across scenarios references optional env vars that aren't always
+// provided. An unprovided one must read as undefined (so `x || default` and
+// `typeof x` work), matching Maestro — not throw ReferenceError. This is the
+// reporter's shell_client.js pattern, with `async` omitted from env.
+func TestScriptEngine_RunScript_UndeclaredEnvIsUndefined(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	script := `
+var is_async = false;
+if (typeof async !== 'undefined') { is_async = async; }
+output.body = JSON.stringify({ command: exec, async: async || false });
+`
+	if err := se.RunScript(script, map[string]string{"exec": "echo hi"}); err != nil {
+		t.Fatalf("unprovided env var must not throw, got: %v", err)
+	}
+	want := `{"command":"echo hi","async":false}`
+	if got := se.GetVariable("body"); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+// TestScriptEngine_RunScript_LocalFunctionNotClobbered guards that the
+// undeclared-safety pre-definition doesn't shadow a function the script itself
+// declares (a local declaration must win over the predefined-undefined global).
+func TestScriptEngine_RunScript_LocalFunctionNotClobbered(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	script := `
+function double(n) { return n * 2; }
+output.result = double(21);
+`
+	if err := se.RunScript(script, nil); err != nil {
+		t.Fatalf("RunScript: %v", err)
+	}
+	if got := se.GetVariable("result"); got != "42" {
+		t.Errorf("result = %q, want %q (local function clobbered by pre-define?)", got, "42")
+	}
+}
+
 // --- Regression tests for issue #70: output mutations + scope reuse ---
 
 // TestScriptEngine_RunScript_OutputArrayPushPersists guards Bug B from #70:
@@ -461,10 +612,10 @@ func TestScriptEngine_ParseIntStrict(t *testing.T) {
 		{"10", 0, 10, false},
 		{"${count}", 0, 5, false},
 		{"10_000", 0, 10000, false},
-		{"", 42, 42, false},     // unspecified → default, no error
-		{"  ", 42, 42, false},   // whitespace-only → default, no error
-		{"abc", 99, 99, true},   // garbage → default + error
-		{"5s", 7, 7, true},      // trailing unit → error (not silently 5)
+		{"", 42, 42, false},   // unspecified → default, no error
+		{"  ", 42, 42, false}, // whitespace-only → default, no error
+		{"abc", 99, 99, true}, // garbage → default + error
+		{"5s", 7, 7, true},    // trailing unit → error (not silently 5)
 	}
 
 	for _, tt := range tests {

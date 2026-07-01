@@ -145,6 +145,12 @@ Examples:
 			EnvVars: []string{"MAESTRO_WAIT_FOR_IDLE_TIMEOUT"},
 		},
 		&cli.IntFlag{
+			Name:    "condition-timeout",
+			Usage:   "Default timeout in ms for when:/while: condition checks (default 1000). Override per condition with `timeout:`.",
+			Value:   1000,
+			EnvVars: []string{"MAESTRO_CONDITION_TIMEOUT"},
+		},
+		&cli.IntFlag{
 			Name:    "typing-frequency",
 			Usage:   "WDA typing speed in keys/sec (default 30). Lower values help React Native apps.",
 			Value:   30,
@@ -468,7 +474,7 @@ type RunConfig struct {
 	Parallel int // Number of devices to use (0 = single device mode)
 
 	// Execution
-	Continuous bool
+	Continuous  bool
 	Headed      bool   // Show browser window (web only, default is headless)
 	Browser     string // chrome, chromium, or path to binary (web only)
 	UserDataDir string // Persistent Chrome profile directory (web only)
@@ -481,18 +487,19 @@ type RunConfig struct {
 	AppID    string // App bundle ID or package name
 
 	// Driver
-	Driver       string                 // uiautomator2, appium
-	AppiumURL    string                 // Appium server URL
+	Driver    string // uiautomator2, appium
+	AppiumURL string // Appium server URL
 	// AppiumSessionFile, when set, makes maestro-runner publish live Appium
 	// session info (sessionId + appiumUrl per device) to this JSON file via the
 	// session-export provider, so external tools can attach without polling
 	// reports. Runs alongside any detected cloud provider. See issue #91.
 	AppiumSessionFile string
 	CapsFile          string                 // Appium capabilities JSON file path
-	Capabilities map[string]interface{} // Parsed Appium capabilities
+	Capabilities      map[string]interface{} // Parsed Appium capabilities
 
 	// Driver settings
 	WaitForIdleTimeout int    // Wait for device idle in ms (0 = disabled, default 200)
+	ConditionTimeout   int    // Default timeout (ms) for when:/while: condition checks (default 1000)
 	TypingFrequency    int    // WDA typing frequency in keys/sec (0 = use WDA default of 60)
 	TeamID             string // Apple Development Team ID for WDA code signing
 	WDABundleID        string // Custom WDA bundle identifier
@@ -693,6 +700,7 @@ func runTest(c *cli.Context) error {
 		CapsFile:           capsFile,
 		Capabilities:       caps,
 		WaitForIdleTimeout: getInt("wait-for-idle-timeout"),
+		ConditionTimeout:   getInt("condition-timeout"),
 		TypingFrequency:    getInt("typing-frequency"),
 		TeamID:             getString("team-id"),
 		WDABundleID:        getString("wda-bundle-id"),
@@ -1362,6 +1370,7 @@ func executeSingleDevice(cfg *RunConfig, flows []flow.Flow) (*executor.RunResult
 		DriverName:         driverName,
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
+		ConditionTimeout:   cfg.ConditionTimeout,
 		TypingFrequency:    cfg.TypingFrequency,
 		DeviceInfo:         &deviceInfo,
 		OnFlowStart:        onFlowStartWithCloud(cfg),
@@ -1403,6 +1412,7 @@ func ExecuteFlowWithDriver(driver core.Driver, cfg *RunConfig, f flow.Flow) (*ex
 		DriverName:         driverName,
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
+		ConditionTimeout:   cfg.ConditionTimeout,
 		TypingFrequency:    cfg.TypingFrequency,
 		DeviceInfo:         &deviceInfo,
 		OnFlowStart:        onFlowStartWithCloud(cfg),
@@ -1721,6 +1731,7 @@ func executeAppiumSingleSession(cfg *RunConfig, flows []flow.Flow) (*executor.Ru
 		DriverName:         "appium",
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
+		ConditionTimeout:   cfg.ConditionTimeout,
 		TypingFrequency:    cfg.TypingFrequency,
 		DeviceInfo:         &deviceInfo,
 		OnFlowStart:        onFlowStartWithCloud(cfg),
@@ -2498,6 +2509,7 @@ func createParallelRunner(cfg *RunConfig, workers []executor.DeviceWorker, platf
 		DriverName:         driverName,
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
+		ConditionTimeout:   cfg.ConditionTimeout,
 		TypingFrequency:    cfg.TypingFrequency,
 		// Callbacks will be set per-worker in parallel.go with device info
 	}
