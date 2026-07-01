@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.19] - 2026-07-01
+
+A reporter-driven follow-up focused on executor/`runScript` parity with Maestro and iOS simulator ergonomics. Headlines: `runScript`'s JavaScript environment now matches Maestro (env vars are scoped per script and undeclared variables read as `undefined` instead of throwing), `when:`/`while:` condition checks resolve **fast by default** instead of blocking on the 7s optional-find timeout, and `--auto-start-emulator` finally works for iOS simulators. Plus an iOS runner build-cache correctness fix.
+
+### Fixed
+- **`runScript` env leaked across scripts; optional vars threw `ReferenceError`** — `runScript` env vars were applied as sticky globals that were never cleared, so a value set in one script bled into the next; and referencing an env var that wasn't provided this run threw `ReferenceError: X is not defined`. Env is now scoped to the single script run and restored afterward, and undeclared identifiers evaluate to `undefined` (matching Maestro's GraalJS behavior), so `someVar || default` and `typeof someVar` work for optional env vars. Real globals and the script's own declarations are untouched. Reported by [@rafaelnobrekz](https://github.com/rafaelnobrekz) ([#109](https://github.com/devicelab-dev/maestro-runner/issues/109)).
+- **`--auto-start-emulator` errored for iOS simulators** — the iOS WDA pre-check decided simulator-vs-real-device before any simulator was started and didn't account for `--auto-start-emulator`, so `--platform ios --parallel 2 --auto-start-emulator` exited demanding `--team-id` before the (working) auto-start path could boot the simulators. `--auto-start-emulator` and `--start-simulator` now count as simulator targets on iOS (a real device can't be auto-created), so neither requires `--team-id` or `--app-file`. Reported by [@rafaelnobrekz](https://github.com/rafaelnobrekz) ([#111](https://github.com/devicelab-dev/maestro-runner/issues/111)).
+- **DeviceLab iOS runner build cache could serve a stale build** — the cache keyed on the simulator iOS version alone, so a release shipping updated runner sources into the same `sim-ios<ver>` slot would reuse the previous build. The cache key now also includes a content hash of the vendored runner source, so it invalidates exactly when the runner changes and is reused otherwise.
+
+### Changed
+- **`when:`/`while:` condition checks are fast by default** — a `runFlow` `when:` (or `repeat` `while:`) condition with no explicit timeout fell through to the driver's 7s optional-find timeout, so every unmet condition blocked ~7s (a flow with several optional `when:` branches paid 7s each). These checks now use a short default timeout (1000ms); a present element still resolves immediately, only an unmet condition is bounded. Tunable globally with `--condition-timeout` (env `MAESTRO_CONDITION_TIMEOUT`) and still overridable per condition with `timeout:`. Reported by [@rafaelnobrekz](https://github.com/rafaelnobrekz) ([#110](https://github.com/devicelab-dev/maestro-runner/issues/110)).
+- **Faster cold DeviceLab iOS runner builds** — the runner now builds against the concrete booted simulator (`-destination platform=iOS Simulator,id=<udid>`) instead of a generic destination, so `xcodebuild` skips re-planning an abstract device.
+
+### Contributors
+Thanks to everyone who reported issues that shaped this release:
+- [@rafaelnobrekz](https://github.com/rafaelnobrekz) — `runScript` env scope + undeclared vars ([#109](https://github.com/devicelab-dev/maestro-runner/issues/109)), fast `when:`/`while:` condition checks ([#110](https://github.com/devicelab-dev/maestro-runner/issues/110)), iOS `--auto-start-emulator` ([#111](https://github.com/devicelab-dev/maestro-runner/issues/111))
+
 ## [1.1.18] - 2026-06-24
 
 A reporter-driven correctness release. The headline theme is **tap and scroll geometry on Android** — taps and `scrollUntilVisible` no longer treat on-screen elements near the bottom edge (or with a momentarily inverted first-frame rect) as off-screen, so bottom-anchored buttons, tall-dialog actions, and below-the-fold list items resolve reliably. Alongside that: the **"Update available" banner now prints a working install URL**, iOS real-device permission dialogs arm correctly when `launchApp` lives in `onFlowStart`/`runFlow`, variable interpolation works in `repeat` `while:` conditions and `runScript` env, WDA failures surface the closest on-screen texts, and JUnit reports keep flow subdirectories in the `file` property.
