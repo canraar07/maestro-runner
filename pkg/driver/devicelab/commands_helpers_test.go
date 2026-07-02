@@ -352,16 +352,16 @@ func TestScrollByAdb_ShellError(t *testing.T) {
 // so unused methods retain their no-op behavior.
 type trackingClient struct {
 	*mockDeviceLabClient
-	backCalls       int
-	pressKeyCodes   []int
-	clipboardText   string
-	orientation     string
-	screenshotData  []byte
-	screenshotErr   error
-	setClipErr      error
-	setOrientErr    error
-	backErr         error
-	pressKeyErr     error
+	backCalls      int
+	pressKeyCodes  []int
+	clipboardText  string
+	orientation    string
+	screenshotData []byte
+	screenshotErr  error
+	setClipErr     error
+	setOrientErr   error
+	backErr        error
+	pressKeyErr    error
 }
 
 func newTrackingClient() *trackingClient {
@@ -1331,11 +1331,11 @@ func TestLooksLikeRegex(t *testing.T) {
 
 func TestEscapeUIAutomatorString(t *testing.T) {
 	cases := map[string]string{
-		"":          "",
-		"plain":     "plain",
-		`"quoted"`:  `\"quoted\"`,
-		`a"b"c`:     `a\"b\"c`,
-		`single'`:   `single'`,
+		"":         "",
+		"plain":    "plain",
+		`"quoted"`: `\"quoted\"`,
+		`a"b"c`:    `a\"b\"c`,
+		`single'`:  `single'`,
 	}
 	for in, want := range cases {
 		if got := escapeUIAutomatorString(in); got != want {
@@ -1606,10 +1606,12 @@ type richClient struct {
 	applySettErr error
 }
 
-func (r *richClient) Source() (string, error)                            { return r.source, r.sourceErr }
-func (r *richClient) GetOrientation() (string, error)                    { return r.orientation, nil }
-func (r *richClient) GetClipboard() (string, error)                      { return r.clipboard, nil }
-func (r *richClient) WaitForSettle(timeoutMs, quietMs int) (bool, error) { return r.settleQuiet, r.settleErr }
+func (r *richClient) Source() (string, error)         { return r.source, r.sourceErr }
+func (r *richClient) GetOrientation() (string, error) { return r.orientation, nil }
+func (r *richClient) GetClipboard() (string, error)   { return r.clipboard, nil }
+func (r *richClient) WaitForSettle(timeoutMs, quietMs int) (bool, error) {
+	return r.settleQuiet, r.settleErr
+}
 func (r *richClient) SetAppiumSettings(settings map[string]interface{}) error {
 	return r.applySettErr
 }
@@ -1770,8 +1772,8 @@ type scriptedClient struct {
 	activeElementReturn *uiautomator2.Element
 	activeElementErr    error
 
-	sendKeyActionsCalls   []string
-	sendKeyActionsErr     error
+	sendKeyActionsCalls []string
+	sendKeyActionsErr   error
 }
 
 func (s *scriptedClient) FindElement(strategy, selector string) (*uiautomator2.Element, error) {
@@ -2189,14 +2191,14 @@ func TestScroll_NoScreenSize(t *testing.T) {
 
 type appLifecycleClient struct {
 	*scriptedClient
-	launches             []string
-	forceStops           []string
-	clearAppDatas        []string
-	grantPermsCalls      int
-	launchAppErr         error
-	forceStopErr         error
-	clearAppDataErr      error
-	grantPermissionsErr  error
+	launches            []string
+	forceStops          []string
+	clearAppDatas       []string
+	grantPermsCalls     int
+	launchAppErr        error
+	forceStopErr        error
+	clearAppDataErr     error
+	grantPermissionsErr error
 }
 
 func (a *appLifecycleClient) LaunchApp(id string, args map[string]interface{}) error {
@@ -2489,14 +2491,14 @@ func TestApplyRelativeFilter(t *testing.T) {
 		ft     relativeFilterType
 		expect int
 	}{
-		{filterBelow, 1},         // only "below"
-		{filterAbove, 1},         // only "above"
-		{filterLeftOf, 0},        // none have a smaller right edge than anchor.left=0
+		{filterBelow, 1},  // only "below"
+		{filterAbove, 1},  // only "above"
+		{filterLeftOf, 0}, // none have a smaller right edge than anchor.left=0
 		{filterRightOf, 0},
 		{filterChildOf, 0},
 		{filterContainsChild, 0},
 		{filterInsideOf, 0},
-		{filterNone, 2},          // default returns input unchanged
+		{filterNone, 2}, // default returns input unchanged
 	}
 	for _, c := range cases {
 		got := applyRelativeFilter(elems, anchor, c.ft)
@@ -2784,9 +2786,9 @@ func TestLaunchAppViaShell_ActivityResolutionFails_FallsBackToMonkey(t *testing.
 	calls := 0
 	shell := &fakeMultiShell{
 		outputs: []string{
-			"No activity found",              // resolve-activity returns garbage
-			"",                                // dumpsys output empty
-			"Events injected: 1",              // monkey succeeds
+			"No activity found",  // resolve-activity returns garbage
+			"",                   // dumpsys output empty
+			"Events injected: 1", // monkey succeeds
 		},
 		errs:    []error{nil, nil, nil},
 		counter: &calls,
@@ -3018,5 +3020,31 @@ func TestEraseText_PartialErase(t *testing.T) {
 	}
 	if typed != "Hel" {
 		t.Errorf("expected re-input \"Hel\", got %q", typed)
+	}
+}
+
+// TestSwipeCoordsInBounds locks in the element-anchored swipe coordinates
+// (start inside the element, end past the opposite edge, negatives clamped).
+// These feed swipeWithAbsoluteCoords so a from:/selector swipe honours
+// duration: instead of the old hard-coded-speed SwipeInArea flick (#114).
+func TestSwipeCoordsInBounds(t *testing.T) {
+	b := core.Bounds{X: 0, Y: 100, Width: 500, Height: 800}
+	cases := []struct {
+		dir            string
+		sx, sy, ex, ey int
+	}{
+		{"left", 450, 500, 0, 500},   // end clamps to 0 (element flush against left edge)
+		{"right", 50, 500, 550, 500}, // end 10% past right edge
+		{"up", 250, 820, 250, 20},    // end 10% above top (100 - 80)
+		{"down", 250, 180, 250, 980}, // end 10% below bottom
+	}
+	for _, c := range cases {
+		t.Run(c.dir, func(t *testing.T) {
+			sx, sy, ex, ey := swipeCoordsInBounds(c.dir, b)
+			if sx != c.sx || sy != c.sy || ex != c.ex || ey != c.ey {
+				t.Errorf("swipeCoordsInBounds(%q) = (%d,%d)->(%d,%d), want (%d,%d)->(%d,%d)",
+					c.dir, sx, sy, ex, ey, c.sx, c.sy, c.ex, c.ey)
+			}
+		})
 	}
 }

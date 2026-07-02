@@ -895,24 +895,20 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 		direction = "up"
 	}
 
-	uiaDir := mapDirection(direction)
-
+	// If a from:/selector element is specified, derive swipe coordinates from
+	// the element's bounds and route through the same ADB `input swipe` path
+	// used by screen-percentage swipes. `SwipeInArea` (the previous path) does
+	// not honor `step.Duration`, producing a fast flick — too fast for native
+	// drag targets (sliders, drag handles), which discard the gesture. This
+	// mirrors the uiautomator2 fix for #114.
 	if step.Selector != nil && !step.Selector.IsEmpty() {
 		_, info, err := d.findElement(*step.Selector, step.IsOptional(), step.TimeoutMs)
 		if err != nil {
 			return errorResult(err, fmt.Sprintf("Element not found for swipe: %v", err))
 		}
 		if info != nil && info.Bounds.Width > 0 {
-			area := uiautomator2.NewRect(
-				info.Bounds.X,
-				info.Bounds.Y,
-				info.Bounds.Width,
-				info.Bounds.Height,
-			)
-			if err := d.client.SwipeInArea(area, uiaDir, 0.7, 0); err != nil {
-				return errorResult(err, fmt.Sprintf("Failed to swipe in element: %v", err))
-			}
-			return successResult(fmt.Sprintf("Swiped %s in element", direction), info)
+			startX, startY, endX, endY := swipeCoordsInBounds(direction, info.Bounds)
+			return d.swipeWithAbsoluteCoords(startX, startY, endX, endY, step.Duration)
 		}
 	}
 
@@ -922,6 +918,35 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 		return errorResult(err, "Failed to get screen size")
 	}
 	return d.swipeWithMaestroCoordinates(direction, width, height, step.Duration)
+}
+
+// swipeCoordsInBounds returns absolute start/end coordinates for a
+// direction-based swipe anchored on an element. The swipe starts inside the
+// element (so the touch is captured) and ends past the opposite edge (so drag
+// targets reach their extreme in the requested direction). Negative results
+// clamp to 0 for elements flush against a screen edge. Mirrors the
+// uiautomator2 driver's helper (#114).
+func swipeCoordsInBounds(direction string, b core.Bounds) (startX, startY, endX, endY int) {
+	clamp := func(v int) int {
+		if v < 0 {
+			return 0
+		}
+		return v
+	}
+	pctX := func(p int) int { return clamp(b.X + b.Width*p/100) }
+	pctY := func(p int) int { return clamp(b.Y + b.Height*p/100) }
+	switch direction {
+	case "up":
+		return pctX(50), pctY(90), pctX(50), pctY(-10)
+	case "down":
+		return pctX(50), pctY(10), pctX(50), pctY(110)
+	case "left":
+		return pctX(90), pctY(50), pctX(-10), pctY(50)
+	case "right":
+		return pctX(10), pctY(50), pctX(110), pctY(50)
+	default:
+		return pctX(50), pctY(50), pctX(50), pctY(0)
+	}
 }
 
 // findScrollableElement waits for and finds a scrollable element.
