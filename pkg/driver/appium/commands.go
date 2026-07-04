@@ -197,9 +197,39 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 	}
 
 	// Direction-based swipe
-	direction := strings.ToLower(step.Direction)
-	if direction == "" {
-		direction = "up"
+	direction, err := core.NormalizeSwipeDirection(step.Direction)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("Invalid swipe direction: %s", step.Direction))
+	}
+
+	duration := step.Duration
+	if duration <= 0 {
+		duration = 500
+	}
+
+	// If a from:/selector element is specified, anchor the swipe on the
+	// element's bounds so drag targets (sliders, drag handles) receive the
+	// gesture, and honour `duration:` — parity with the uiautomator2 /
+	// devicelab fix (#114).
+	if step.Selector != nil && !step.Selector.IsEmpty() {
+		timeout := time.Duration(step.TimeoutMs) * time.Millisecond
+		if timeout <= 0 {
+			timeout = d.getFindTimeout()
+		}
+		info, err := d.findElement(*step.Selector, timeout)
+		if err != nil {
+			return errorResult(err, fmt.Sprintf("Element not found for swipe: %s", step.Selector.Describe()))
+		}
+		if info != nil && info.Bounds.Width > 0 {
+			startX, startY, endX, endY, err := core.SwipeCoordsInBounds(direction, info.Bounds, w, h)
+			if err != nil {
+				return errorResult(err, fmt.Sprintf("Invalid swipe direction: %s", step.Direction))
+			}
+			if err := d.client.Swipe(startX, startY, endX, endY, duration); err != nil {
+				return errorResult(err, "Failed to swipe")
+			}
+			return successResult(fmt.Sprintf("Swiped %s in element", direction), info)
+		}
 	}
 
 	// Swipe coordinates match Maestro behavior:
@@ -226,7 +256,7 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 		return errorResult(fmt.Errorf("invalid direction: %s", direction), "")
 	}
 
-	if err := d.client.Swipe(startX, startY, endX, endY, 500); err != nil {
+	if err := d.client.Swipe(startX, startY, endX, endY, duration); err != nil {
 		return errorResult(err, "Failed to swipe")
 	}
 
