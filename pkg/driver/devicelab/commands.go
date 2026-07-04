@@ -890,9 +890,9 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 		return d.swipeWithAbsoluteCoords(step.StartX, step.StartY, step.EndX, step.EndY, step.Duration)
 	}
 
-	direction := strings.ToLower(step.Direction)
-	if direction == "" {
-		direction = "up"
+	direction, err := core.NormalizeSwipeDirection(step.Direction)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("Invalid swipe direction: %s", step.Direction))
 	}
 
 	// If a from:/selector element is specified, derive swipe coordinates from
@@ -907,7 +907,11 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 			return errorResult(err, fmt.Sprintf("Element not found for swipe: %v", err))
 		}
 		if info != nil && info.Bounds.Width > 0 {
-			startX, startY, endX, endY := swipeCoordsInBounds(direction, info.Bounds)
+			screenW, screenH, _ := d.screenSize() // (0,0) when unknown → far-edge clamp skipped
+			startX, startY, endX, endY, err := core.SwipeCoordsInBounds(direction, info.Bounds, screenW, screenH)
+			if err != nil {
+				return errorResult(err, fmt.Sprintf("Invalid swipe direction: %s", step.Direction))
+			}
 			return d.swipeWithAbsoluteCoords(startX, startY, endX, endY, step.Duration)
 		}
 	}
@@ -918,35 +922,6 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 		return errorResult(err, "Failed to get screen size")
 	}
 	return d.swipeWithMaestroCoordinates(direction, width, height, step.Duration)
-}
-
-// swipeCoordsInBounds returns absolute start/end coordinates for a
-// direction-based swipe anchored on an element. The swipe starts inside the
-// element (so the touch is captured) and ends past the opposite edge (so drag
-// targets reach their extreme in the requested direction). Negative results
-// clamp to 0 for elements flush against a screen edge. Mirrors the
-// uiautomator2 driver's helper (#114).
-func swipeCoordsInBounds(direction string, b core.Bounds) (startX, startY, endX, endY int) {
-	clamp := func(v int) int {
-		if v < 0 {
-			return 0
-		}
-		return v
-	}
-	pctX := func(p int) int { return clamp(b.X + b.Width*p/100) }
-	pctY := func(p int) int { return clamp(b.Y + b.Height*p/100) }
-	switch direction {
-	case "up":
-		return pctX(50), pctY(90), pctX(50), pctY(-10)
-	case "down":
-		return pctX(50), pctY(10), pctX(50), pctY(110)
-	case "left":
-		return pctX(90), pctY(50), pctX(-10), pctY(50)
-	case "right":
-		return pctX(10), pctY(50), pctX(110), pctY(50)
-	default:
-		return pctX(50), pctY(50), pctX(50), pctY(0)
-	}
 }
 
 // findScrollableElement waits for and finds a scrollable element.

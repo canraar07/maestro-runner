@@ -3023,28 +3023,15 @@ func TestEraseText_PartialErase(t *testing.T) {
 	}
 }
 
-// TestSwipeCoordsInBounds locks in the element-anchored swipe coordinates
-// (start inside the element, end past the opposite edge, negatives clamped).
-// These feed swipeWithAbsoluteCoords so a from:/selector swipe honours
-// duration: instead of the old hard-coded-speed SwipeInArea flick (#114).
-func TestSwipeCoordsInBounds(t *testing.T) {
-	b := core.Bounds{X: 0, Y: 100, Width: 500, Height: 800}
-	cases := []struct {
-		dir            string
-		sx, sy, ex, ey int
-	}{
-		{"left", 450, 500, 0, 500},   // end clamps to 0 (element flush against left edge)
-		{"right", 50, 500, 550, 500}, // end 10% past right edge
-		{"up", 250, 820, 250, 20},    // end 10% above top (100 - 80)
-		{"down", 250, 180, 250, 980}, // end 10% below bottom
-	}
-	for _, c := range cases {
-		t.Run(c.dir, func(t *testing.T) {
-			sx, sy, ex, ey := swipeCoordsInBounds(c.dir, b)
-			if sx != c.sx || sy != c.sy || ex != c.ex || ey != c.ey {
-				t.Errorf("swipeCoordsInBounds(%q) = (%d,%d)->(%d,%d), want (%d,%d)->(%d,%d)",
-					c.dir, sx, sy, ex, ey, c.sx, c.sy, c.ex, c.ey)
-			}
-		})
+// TestSwipeInvalidDirection verifies a direction typo fails the step instead
+// of silently swiping up (the pre-#114 default-case behavior).
+func TestSwipeInvalidDirection(t *testing.T) {
+	driver := &Driver{}
+
+	step := &flow.SwipeStep{Direction: "diagonal"}
+	result := driver.swipe(step)
+
+	if result.Success {
+		t.Error("expected failure for invalid swipe direction")
 	}
 }
