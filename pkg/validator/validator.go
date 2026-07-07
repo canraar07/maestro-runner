@@ -137,8 +137,9 @@ func (v *Validator) collectByPatterns(dir string, patterns []string) ([]string, 
 func (v *Validator) matchPattern(dir, pattern string) ([]string, error) {
 	var files []string
 
-	// Handle "**" for recursive matching
-	if pattern == "**" || strings.HasPrefix(pattern, "**/") {
+	// filepath.Glob does not understand "**", so route any pattern that
+	// contains it through the recursive walker.
+	if strings.Contains(pattern, "**") {
 		return v.collectRecursive(dir, pattern)
 	}
 
@@ -177,17 +178,27 @@ func (v *Validator) matchPattern(dir, pattern string) ([]string, error) {
 	return files, nil
 }
 
-// collectRecursive collects all flow files recursively.
+// collectRecursive collects flow files matching a pattern that contains "**".
+// The pattern is split on the first "**" into an optional prefix (walked from)
+// and an optional suffix (matched per-segment against each file's trailing
+// path). E.g. "tests/**/*.yaml" walks from dir/tests and keeps files whose
+// name matches "*.yaml".
 func (v *Validator) collectRecursive(dir, pattern string) ([]string, error) {
 	var files []string
 
-	// Get the suffix after **/ if any
-	suffix := ""
-	if strings.HasPrefix(pattern, "**/") {
-		suffix = pattern[3:]
+	idx := strings.Index(pattern, "**")
+	if idx < 0 {
+		return nil, fmt.Errorf("collectRecursive called without ** in pattern %q", pattern)
+	}
+	prefix := strings.TrimSuffix(pattern[:idx], "/")
+	suffix := strings.TrimPrefix(pattern[idx+2:], "/")
+
+	rootDir := dir
+	if prefix != "" {
+		rootDir = filepath.Join(dir, prefix)
 	}
 
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -197,20 +208,38 @@ func (v *Validator) collectRecursive(dir, pattern string) ([]string, error) {
 		if !isFlowFile(path) {
 			return nil
 		}
-
-		// If there's a suffix pattern, check if filename matches
 		if suffix != "" {
-			matched, _ := filepath.Match(suffix, filepath.Base(path))
-			if !matched {
+			rel, relErr := filepath.Rel(rootDir, path)
+			if relErr != nil {
+				return nil
+			}
+			if !matchTail(filepath.ToSlash(rel), suffix) {
 				return nil
 			}
 		}
-
 		files = append(files, path)
 		return nil
 	})
 
 	return files, err
+}
+
+// matchTail reports whether the trailing "/"-separated segments of rel match
+// the per-segment glob pattern suffix.
+func matchTail(rel, suffix string) bool {
+	suffixParts := strings.Split(suffix, "/")
+	relParts := strings.Split(rel, "/")
+	if len(relParts) < len(suffixParts) {
+		return false
+	}
+	tail := relParts[len(relParts)-len(suffixParts):]
+	for i, seg := range suffixParts {
+		matched, err := filepath.Match(seg, tail[i])
+		if err != nil || !matched {
+			return false
+		}
+	}
+	return true
 }
 
 // getTopLevelFlows gets flow files directly in a directory (not recursive).
