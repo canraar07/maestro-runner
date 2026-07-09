@@ -1356,6 +1356,23 @@ func TestSplitYAMLDocuments(t *testing.T) {
 			content:  "   \n  \n  ",
 			expected: 0,
 		},
+		{
+			// #119: a header comment ending in "->" must not flip the
+			// splitter into multiline mode and swallow the --- separator.
+			name:     "comment ending in arrow before separator",
+			content:  "appId: com.app\n# navigation: Library ->\ntags:\n  - e2e\n---\n- launchApp",
+			expected: 2,
+		},
+		{
+			name:     "comment ending in pipe before separator",
+			content:  "appId: com.app\n# see table |\n---\n- launchApp",
+			expected: 2,
+		},
+		{
+			name:     "plain value ending in arrow before separator",
+			content:  "appId: com.app\nname: Library ->\n---\n- launchApp",
+			expected: 2,
+		},
 	}
 
 	for _, tc := range tests {
@@ -1365,6 +1382,73 @@ func TestSplitYAMLDocuments(t *testing.T) {
 				t.Errorf("splitYAMLDocuments() returned %d parts, want %d", len(parts), tc.expected)
 			}
 		})
+	}
+}
+
+// TestParse_ArrowCommentHeader is the end-to-end regression for #119: the
+// full file from the issue report must parse with config and steps intact.
+func TestParse_ArrowCommentHeader(t *testing.T) {
+	content := `appId: com.example.app
+name: "x"
+# navigation: Library ->
+tags:
+  - e2e
+---
+- launchApp
+`
+	f, err := Parse([]byte(content), "bug.yaml")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if f.Config.AppID != "com.example.app" {
+		t.Errorf("AppID = %q, want com.example.app", f.Config.AppID)
+	}
+	if len(f.Steps) != 1 {
+		t.Errorf("got %d steps, want 1", len(f.Steps))
+	}
+}
+
+// TestParse_BareScrollDefaultsDown is the regression for #120: `- scroll`
+// with no arguments scrolls down, matching Maestro's documented default.
+func TestParse_BareScrollDefaultsDown(t *testing.T) {
+	content := "appId: com.app\n---\n- launchApp\n- scroll\n"
+	f, err := Parse([]byte(content), "scroll.yaml")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	var scroll *ScrollStep
+	for _, s := range f.Steps {
+		if ss, ok := s.(*ScrollStep); ok {
+			scroll = ss
+		}
+	}
+	if scroll == nil {
+		t.Fatal("no ScrollStep parsed")
+	}
+	if scroll.Direction != "down" {
+		t.Errorf("Direction = %q, want \"down\"", scroll.Direction)
+	}
+}
+
+func TestStartsBlockScalar(t *testing.T) {
+	cases := map[string]bool{
+		"script: |":                true,
+		"script: |-":               true,
+		"text: >":                  true,
+		"text: >-":                 true,
+		"cmd: |2":                  true,
+		"cmd: >+":                  true,
+		"# navigation: Library ->": false,
+		"# see the table |":        false,
+		"name: Library ->":         false,
+		"name: value":              false,
+		"":                         false,
+		"# comment: use |":         false,
+	}
+	for in, want := range cases {
+		if got := startsBlockScalar(in); got != want {
+			t.Errorf("startsBlockScalar(%q) = %v, want %v", in, got, want)
+		}
 	}
 }
 
