@@ -797,7 +797,7 @@ func (d *Driver) findFocused() (core.Element, error) {
 	// Try native
 	if d.webView == nil || d.webView.webViewType() != "browser" {
 		active, err := d.client.ActiveElement()
-		if err == nil {
+		if err == nil && active != nil {
 			info := &core.ElementInfo{Visible: true, Enabled: true}
 			if text, textErr := active.Text(); textErr == nil {
 				info.Text = text

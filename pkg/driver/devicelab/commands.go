@@ -513,10 +513,28 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 			}
 		}
 	} else {
-		// No selector — send key events directly to whatever the OS has focused.
-		// Matches Maestro's behavior: pressKeyCode for each character.
-		if err := d.client.SendKeyActions(text); err != nil {
-			return errorResult(err, fmt.Sprintf("Failed to input text: %v", err))
+		// No selector — type into whatever has focus. findFocused prefers
+		// the WebView's DOM activeElement over the native ActiveElement,
+		// which matters after a CDP tap: the DOM input has focus but blind
+		// native key events never reach it, while the call still reports
+		// success (#122). Element-scoped native typing likewise fixes
+		// WebView inputs reached via a11y focus. Fall back to raw key
+		// events when nothing reports focus.
+		//
+		// History: acea0c7 removed an ActiveElement path here because it
+		// dragged a fragile focused=true selector-search fallback with it.
+		// This reintroduction is a single findFocused round-trip with a
+		// plain key-events fallback — no selector search.
+		typed := false
+		if focused, err := d.findFocused(); err == nil && focused != nil {
+			if err := focused.Input(text); err == nil {
+				typed = true
+			}
+		}
+		if !typed {
+			if err := d.client.SendKeyActions(text); err != nil {
+				return errorResult(err, fmt.Sprintf("Failed to input text: %v", err))
+			}
 		}
 	}
 

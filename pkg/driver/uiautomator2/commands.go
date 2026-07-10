@@ -286,10 +286,29 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 			return errorResult(err, fmt.Sprintf("Failed to input text: %v", err))
 		}
 	} else {
-		// No selector — send key events directly to whatever the OS has focused.
-		// Matches Maestro's behavior: pressKeyCode for each character.
-		if err := d.client.SendKeyActions(text); err != nil {
-			return errorResult(err, fmt.Sprintf("Failed to input text: %v", err))
+		// No selector — prefer element-scoped typing into the focused
+		// element (POST /element/{id}/value). Blind key events can silently
+		// miss WebView DOM inputs on some devices (#122 — same wire
+		// mechanism failing over Appium on cloud farms); element send-keys
+		// routes through accessibility ACTION_SET_TEXT, which Chrome
+		// translates into a real DOM value change, and the UiAutomator2
+		// server appends rather than replaces, preserving type-into-focused
+		// semantics. Fall back to key events when nothing has focus.
+		//
+		// History: acea0c7 removed an ActiveElement path here because it
+		// dragged a fragile focused=true selector-search fallback with it.
+		// This reintroduction is a single ActiveElement round-trip with a
+		// plain key-events fallback — no selector search.
+		typed := false
+		if active, err := d.client.ActiveElement(); err == nil && active != nil {
+			if err := active.SendKeys(text); err == nil {
+				typed = true
+			}
+		}
+		if !typed {
+			if err := d.client.SendKeyActions(text); err != nil {
+				return errorResult(err, fmt.Sprintf("Failed to input text: %v", err))
+			}
 		}
 	}
 

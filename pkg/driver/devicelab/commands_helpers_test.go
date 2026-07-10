@@ -1983,10 +1983,49 @@ func TestAssertVisible_NotFound(t *testing.T) {
 }
 
 // =============================================================================
-// inputText — no-selector path uses SendKeyActions directly
+// inputText — no-selector path prefers focused element, falls back to keys
 // =============================================================================
 
+// TestInputText_NoSelector_PrefersFocusedElement locks in the #122 fix:
+// with a focused element available, typing is element-scoped (reaches
+// WebView DOM inputs) instead of blind key events.
+func TestInputText_NoSelector_PrefersFocusedElement(t *testing.T) {
+	var typed string
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementReturn = makeFocusedElement("", &typed, nil, nil)
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.inputText(&flow.InputTextStep{Text: "hello"})
+	if !res.Success {
+		t.Fatalf("inputText no-selector: %v", res.Error)
+	}
+	if typed != "hello" {
+		t.Errorf("expected element-scoped typing of %q, got %q", "hello", typed)
+	}
+	if len(client.sendKeyActionsCalls) != 0 {
+		t.Errorf("expected no blind key actions, got %v", client.sendKeyActionsCalls)
+	}
+}
+
+// TestInputText_NoSelector_FallsBackOnElementError verifies blind key events
+// remain the fallback when element-scoped typing fails.
+func TestInputText_NoSelector_FallsBackOnElementError(t *testing.T) {
+	var typed string
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementReturn = makeFocusedElement("", &typed, nil, fmt.Errorf("setText rejected"))
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.inputText(&flow.InputTextStep{Text: "hello"})
+	if !res.Success {
+		t.Fatalf("inputText no-selector: %v", res.Error)
+	}
+	if len(client.sendKeyActionsCalls) != 1 || client.sendKeyActionsCalls[0] != "hello" {
+		t.Errorf("expected key-actions fallback with %q, got %v", "hello", client.sendKeyActionsCalls)
+	}
+}
+
 func TestInputText_NoSelector_SendsKeyActions(t *testing.T) {
+	// No focused element at all — key events are the last resort.
 	client := &scriptedClient{trackingClient: newTrackingClient()}
 	driver := New(client, &core.PlatformInfo{}, &mockShell{})
 
