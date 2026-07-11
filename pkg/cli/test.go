@@ -2083,8 +2083,14 @@ func enhanceNoDevicesError(noDevErr *device.NoDevicesError, cfg *RunConfig) {
 }
 
 // buildParallelDeviceError creates a helpful error when --parallel needs more devices.
+// The remediation hints are platform-specific: iOS runs get simulator guidance,
+// everything else gets the Android AVD/emulator guidance (#121).
 func buildParallelDeviceError(cfg *RunConfig, found int) error {
 	msg := fmt.Sprintf("--parallel %d requires %d devices but only found %d\n", cfg.Parallel, cfg.Parallel, found)
+
+	if cfg.Platform == "ios" {
+		return buildParallelIOSDeviceError(cfg, found, msg)
+	}
 
 	// Try to list available AVDs
 	avds, _ := emulator.ListAVDs()
@@ -2107,20 +2113,7 @@ func buildParallelDeviceError(cfg *RunConfig, found int) error {
 	}
 
 	if len(avds) > 0 {
-		// Build the actual command the user would run
-		args := os.Args
-		globalPart := args[0]
-		testPart := ""
-		for i := 1; i < len(args); i++ {
-			if args[i] == "test" {
-				globalPart = strings.Join(args[:i], " ")
-				testPart = " " + strings.Join(args[i:], " ")
-				break
-			}
-		}
-		if testPart == "" {
-			globalPart = strings.Join(args, " ")
-		}
+		globalPart, testPart := currentCommandParts()
 
 		msg += fmt.Sprintf("  %d. Auto-start emulators: %s --auto-start-emulator%s\n", optNum, globalPart, testPart)
 		optNum++
@@ -2141,6 +2134,63 @@ func buildParallelDeviceError(cfg *RunConfig, found int) error {
 	}
 
 	return fmt.Errorf("%s", msg)
+}
+
+// buildParallelIOSDeviceError builds the iOS-flavoured remediation for a
+// --parallel device shortage: boot more simulators (or let
+// --auto-start-emulator do it — supported for iOS since v1.1.19), never
+// Android AVD guidance (#121).
+func buildParallelIOSDeviceError(cfg *RunConfig, found int, msg string) error {
+	needed := cfg.Parallel - found
+
+	shutdownSims, _ := simulator.ListShutdownIOSSimulators()
+	if len(shutdownSims) > 0 {
+		msg += "\nAvailable iOS simulators (shut down):\n"
+		for _, sim := range shutdownSims {
+			msg += fmt.Sprintf("  - %s (%s)\n", sim.Name, sim.UDID)
+		}
+	}
+
+	msg += "\nOptions:\n"
+	optNum := 1
+
+	globalPart, testPart := currentCommandParts()
+	msg += fmt.Sprintf("  %d. Auto-start simulators: %s --auto-start-emulator%s\n", optNum, globalPart, testPart)
+	optNum++
+
+	if len(shutdownSims) > 0 {
+		msg += fmt.Sprintf("  %d. Boot simulators manually:\n", optNum)
+		limit := needed
+		if limit > len(shutdownSims) {
+			limit = len(shutdownSims)
+		}
+		for i := 0; i < limit; i++ {
+			msg += fmt.Sprintf("     xcrun simctl boot %s   # %s\n", shutdownSims[i].UDID, shutdownSims[i].Name)
+		}
+		optNum++
+	} else {
+		msg += fmt.Sprintf("  %d. Create simulators: xcrun simctl create <name> <device-type>\n", optNum)
+		optNum++
+	}
+
+	msg += fmt.Sprintf("  %d. Connect %d more iOS device(s) via USB\n", optNum, needed)
+
+	return fmt.Errorf("%s", msg)
+}
+
+// currentCommandParts splits os.Args around the `test` subcommand so hints
+// can splice extra flags into the command the user actually ran.
+func currentCommandParts() (globalPart, testPart string) {
+	args := os.Args
+	globalPart = args[0]
+	for i := 1; i < len(args); i++ {
+		if args[i] == "test" {
+			globalPart = strings.Join(args[:i], " ")
+			testPart = " " + strings.Join(args[i:], " ")
+			return globalPart, testPart
+		}
+	}
+	return strings.Join(args, " "), ""
 }
 
 // buildNotEnoughAVDsError creates a helpful error when --parallel N requires more
