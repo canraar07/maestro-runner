@@ -96,9 +96,18 @@ typedef NS_ENUM(NSUInteger, FBUIInterfaceAppearance) {
 - (BOOL)fb_openUrl:(NSString *)url withApplication:(NSString *)bundleId error:(NSError **)error;
 
 /**
+ Checks if the device has a specific hardware button available.
+
+ @param buttonName The name of the button to check (e.g., "home", "volumeUp", "volumeDown", "action", "camera")
+ @return YES if the button is available on the device, otherwise NO
+ */
+- (BOOL)fb_hasButton:(NSString *)buttonName;
+
+/**
  Presses the corresponding hardware button on the device with duration.
 
- @param buttonName One of the supported button names: volumeUp (real devices only), volumeDown (real device only), home
+ @param buttonName One of the supported button names: volumeUp (real devices only), volumeDown (real device only),
+                   camera (supported iOS 16+ real devices only), action (supported iOS 16+ devices only), home
  @param duration Duration in seconds or nil.
                 This argument works only on tvOS. When this argument is nil on tvOS,
                 https://developer.apple.com/documentation/xctest/xcuiremote/1627476-pressbutton will be called.
@@ -160,7 +169,7 @@ typedef NS_ENUM(NSUInteger, FBUIInterfaceAppearance) {
 #if !TARGET_OS_TV
 /**
  Allows to set a simulated geolocation coordinates.
- Only works since Xcode 14.3/iOS 16.4
+ Only works since iOS 16.4 runtime
 
  @param location The simlated location coordinates to set
  @param error If there is an error, upon return contains an NSError object that describes the problem.
@@ -170,7 +179,7 @@ typedef NS_ENUM(NSUInteger, FBUIInterfaceAppearance) {
 
 /**
  Allows to get a simulated geolocation coordinates.
- Only works since Xcode 14.3/iOS 16.4
+ Only works since iOS 16.4 runtime
 
  @param error If there is an error, upon return contains an NSError object that describes the problem.
  @return The current simulated location or nil in case of failure or if no location has previously been seet
@@ -180,7 +189,7 @@ typedef NS_ENUM(NSUInteger, FBUIInterfaceAppearance) {
 
 /**
  Allows to clear a previosuly set simulated geolocation coordinates.
- Only works since Xcode 14.3/iOS 16.4
+ Only works since iOS 16.4 runtime
 
  @param error If there is an error, upon return contains an NSError object that describes the problem.
  @return YES if the simulated location has been successfully cleared

@@ -10,16 +10,13 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+extern NSString *const FBSnapshotMaxChildrenKey;
 extern NSString *const FBSnapshotMaxDepthKey;
 
 /**
  Accessors for Global Constants.
  */
 @interface FBConfiguration : NSObject
-
-/*! If set to YES will ask TestManagerDaemon for element visibility */
-+ (void)setShouldUseTestManagerForVisibilityDetection:(BOOL)value;
-+ (BOOL)shouldUseTestManagerForVisibilityDetection;
 
 /*! If set to YES will use compact (standards-compliant) & faster responses */
 + (void)setShouldUseCompactResponses:(BOOL)value;
@@ -136,13 +133,19 @@ extern NSString *const FBSnapshotMaxDepthKey;
 + (NSInteger)mjpegServerPort;
 
 /**
+ The maximum allowed HTTP request body size in bytes.
+ Defaults to 1GB and can be overridden with the MAX_HTTP_REQUEST_BODY_SIZE environment variable.
+ */
++ (UInt64)httpRequestBodySizeLimit;
+
+/**
  The scaling factor for frames of the mjpeg stream. The default (and maximum) value is 100,
  which does not perform any scaling. The minimum value must be greater than zero.
  ! Setting this to a value less than 100, especially together with orientation fixing enabled
  ! may lead to WDA process termination because of an excessive CPU usage.
  */
-+ (CGFloat)mjpegScalingFactor;
-+ (void)setMjpegScalingFactor:(CGFloat)scalingFactor;
++ (double)mjpegScalingFactor;
++ (void)setMjpegScalingFactor:(double)scalingFactor;
 
 /**
  YES if verbose logging is enabled. NO otherwise.
@@ -207,6 +210,22 @@ typedef NS_ENUM(NSInteger, FBConfigurationKeyboardPreference) {
 + (int)snapshotMaxDepth;
 
 /**
+ Sets the maximum number of element children to traverse in each snapshot
+ while requesting XCElementSnapshot.
+ Used to set the `maxChildren` value in a dictionary provided by
+ XCAXClient_iOS's `defaultParameters` method.
+ The original XCAXClient_iOS `maxChildren` value is `INT_MAX`.
+
+ @param maxChildren The number of maximum element children for traversing elements tree
+ */
++ (void)setSnapshotMaxChildren:(int)maxChildren;
+
+/**
+  @return The maximum number of element children for traversing elements tree
+ */
++ (int)snapshotMaxChildren;
+
+/**
  * Whether to use fast search result matching while searching for elements.
  * By default this is disabled due to https://github.com/appium/appium/issues/10101
  * but it still makes sense to enable it for views containing large counts of elements
@@ -258,17 +277,6 @@ typedef NS_ENUM(NSInteger, FBConfigurationKeyboardPreference) {
  */
 + (void)setAnimationCoolOffTimeout:(NSTimeInterval)timeout;
 + (NSTimeInterval)animationCoolOffTimeout;
-
-/**
- Enforces the page hierarchy to include non modal elements,
- like Contacts. By default such elements are not present there.
- See https://github.com/appium/appium/issues/13227
-
- @param isEnabled Set to YES in order to enable non modal elements inclusion.
- Setting this value to YES will have no effect if the current iOS SDK does not support such feature.
- */
-+ (void)setIncludeNonModalElements:(BOOL)isEnabled;
-+ (BOOL)includeNonModalElements;
 
 /**
  Sets custom class chain locators for accept/dismiss alert buttons location.
@@ -363,6 +371,24 @@ typedef NS_ENUM(NSInteger, FBConfigurationKeyboardPreference) {
  */
 + (void)setIncludeNativeFrameInPageSource:(BOOL)enabled;
 + (BOOL)includeNativeFrameInPageSource;
+
+/**
+ * Whether to include the `nativeAccessibilityElement` attribute in the XML page source.
+ *
+ * When enabled, the XML representation will contain the raw, native
+ * `isAccessibilityElement` value as reported by the accessibility framework,
+ * without the custom computation that WebDriverAgent applies to the
+ * `accessible` attribute (cell/text field special cases and parent absorption).
+ *
+ * This is useful for consumers that need to reason about the unmodified
+ * accessibility flag alongside the computed `accessible` value.
+ *
+ * The value is disabled by default to keep the default page source stable.
+ *
+ * @param enabled Either YES or NO
+ */
++ (void)setIncludeNativeAccessibilityElementInPageSource:(BOOL)enabled;
++ (BOOL)includeNativeAccessibilityElementInPageSource;
 
 /**
  * Whether to include `minValue`/`maxValue` attributes in the page source.

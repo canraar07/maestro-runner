@@ -1,6 +1,5 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { asyncify } from 'asyncbox';
 import { logger, fs } from '@appium/support';
 import { exec } from 'teen_process';
 import * as xcode from 'appium-xcode';
@@ -21,6 +20,11 @@ const WDA_BUNDLE_TV_PATH = path.join(DERIVED_DATA_PATH, 'Build', 'Products', 'De
 const TARGETS = ['runner', 'tv_runner'];
 const SDKS = ['sim', 'tv_sim'];
 
+/**
+ * Build WebDriverAgent and pack the app bundle into a zip archive.
+ *
+ * @param {string} [xcodeVersion] Xcode version to include in archive name.
+ */
 async function buildWebDriverAgent (xcodeVersion) {
   const target = process.env.TARGET;
   const sdk = process.env.SDK;
@@ -78,7 +82,12 @@ async function buildWebDriverAgent (xcodeVersion) {
 }
 
 if (isMainModule) {
-  asyncify(buildWebDriverAgent);
+  try {
+    await buildWebDriverAgent();
+  } catch (e) {
+    LOG.error(e);
+    process.exit(1);
+  }
 }
 
 export default buildWebDriverAgent;

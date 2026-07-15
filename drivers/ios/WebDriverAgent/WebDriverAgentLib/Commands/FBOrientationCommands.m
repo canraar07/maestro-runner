@@ -47,6 +47,8 @@ const struct FBWDOrientationValues FBWDOrientationValues = {
     [[FBRoute GET:@"/rotation"].withoutSession respondWithTarget:self action:@selector(handleGetRotation:)],
     [[FBRoute POST:@"/rotation"] respondWithTarget:self action:@selector(handleSetRotation:)],
     [[FBRoute POST:@"/rotation"].withoutSession respondWithTarget:self action:@selector(handleSetRotation:)],
+    [[FBRoute GET:@"/wda/deviceOrientation"] respondWithTarget:self action:@selector(handleGetDeviceOrientation:)],
+    [[FBRoute GET:@"/wda/deviceOrientation"].withoutSession respondWithTarget:self action:@selector(handleGetDeviceOrientation:)],
   ];
 }
 
@@ -113,6 +115,11 @@ const struct FBWDOrientationValues FBWDOrientationValues = {
   return FBResponseWithOK();
 }
 
++ (id<FBResponsePayload>)handleGetDeviceOrientation:(FBRouteRequest *)request
+{
+  return FBResponseWithObject(XCUIDevice.sharedDevice.fb_deviceOrientation);
+}
+
 
 #pragma mark - Helpers
 
@@ -139,7 +146,7 @@ const struct FBWDOrientationValues FBWDOrientationValues = {
   if (orientationValue == nil) {
     return NO;
   }
-  return [[XCUIDevice sharedDevice] fb_setDeviceInterfaceOrientation:orientationValue.integerValue];
+  return [[XCUIDevice sharedDevice] fb_setDeviceInterfaceOrientation:(UIDeviceOrientation)orientationValue.integerValue];
 }
 
 + (NSDictionary *)_orientationsMapping

@@ -1,25 +1,23 @@
-import chai, { expect } from 'chai';
-import chaiAsPromised from 'chai-as-promised';
-import { Simctl } from 'node-simctl';
-import { getSimulator } from 'appium-ios-simulator';
-import { killAllSimulators, shutdownSimulator } from './helpers/simulator';
-import { SubProcess } from 'teen_process';
-import { PLATFORM_VERSION, DEVICE_NAME } from './desired';
-import { retryInterval } from 'asyncbox';
-import { WebDriverAgent } from '../../lib/webdriveragent';
+import {Simctl} from 'node-simctl';
+import {getSimulator} from 'appium-ios-simulator';
+import {killAllSimulators, shutdownSimulator} from './helpers/simulator';
+import {SubProcess} from 'teen_process';
+import {PLATFORM_VERSION, DEVICE_NAME} from './desired';
+import {retryInterval} from 'asyncbox';
+import {WebDriverAgent} from '../../lib/webdriveragent';
 import axios from 'axios';
-import type { AppleDevice } from '../../lib/types';
+import type {AppleDevice} from '../../lib/types';
+import {describe, before, after, beforeEach, afterEach, it} from 'node:test';
+import assert from 'node:assert/strict';
 
-chai.use(chaiAsPromised);
-
-const MOCHA_TIMEOUT_MS = 60 * 1000 * 5;
+type SimulatorTestDevice = AppleDevice & {simctl: Simctl};
 
 const SIM_DEVICE_NAME = 'webDriverAgentTest';
-const SIM_STARTUP_TIMEOUT_MS = MOCHA_TIMEOUT_MS;
+const SIM_STARTUP_TIMEOUT_MS = 60 * 1000 * 5;
 
 const testUrl = 'http://localhost:8100/tree';
 
-function getStartOpts (device: AppleDevice) {
+function getStartOpts(device: AppleDevice) {
   return {
     device,
     platformVersion: PLATFORM_VERSION,
@@ -31,22 +29,15 @@ function getStartOpts (device: AppleDevice) {
   };
 }
 
-
 describe('WebDriverAgent', function () {
-  this.timeout(MOCHA_TIMEOUT_MS);
-
   describe('with fresh sim', function () {
-    let device: AppleDevice;
+    let device: SimulatorTestDevice;
     let simctl: Simctl;
 
     before(async function () {
       simctl = new Simctl();
-      simctl.udid = await simctl.createDevice(
-        SIM_DEVICE_NAME,
-        DEVICE_NAME,
-        PLATFORM_VERSION
-      );
-      device = await getSimulator(simctl.udid);
+      simctl.udid = await simctl.createDevice(SIM_DEVICE_NAME, DEVICE_NAME, PLATFORM_VERSION);
+      device = (await getSimulator(simctl.udid)) as SimulatorTestDevice;
 
       // Prebuild WDA
       const wda = new WebDriverAgent({
@@ -61,18 +52,18 @@ describe('WebDriverAgent', function () {
     });
 
     after(async function () {
-      this.timeout(MOCHA_TIMEOUT_MS);
-
       await shutdownSimulator(device);
 
       await simctl.deleteDevice();
     });
 
     describe('with running sim', function () {
-      this.timeout(6 * 60 * 1000);
       beforeEach(async function () {
         await killAllSimulators();
-        await device.run({startupTimeout: SIM_STARTUP_TIMEOUT_MS});
+        await device.simctl.startBootMonitor({
+          shouldPreboot: true,
+          timeout: SIM_STARTUP_TIMEOUT_MS,
+        });
       });
       afterEach(async function () {
         try {
@@ -86,14 +77,11 @@ describe('WebDriverAgent', function () {
         const agent = new WebDriverAgent(getStartOpts(device));
 
         await agent.launch('sessionId');
-        await expect(axios({url: testUrl})).to.be.rejected;
+        await assert.rejects(() => axios({url: testUrl}), /Request failed with status code 404/);
         await agent.quit();
       });
 
       it('should fail if xcodebuild fails', async function () {
-        // short timeout
-        this.timeout(35 * 1000);
-
         const agent = new WebDriverAgent(getStartOpts(device));
         (agent.xcodebuild as any).createSubProcess = async function () {
           const args = [
@@ -108,12 +96,10 @@ describe('WebDriverAgent', function () {
           return new SubProcess('xcodebuild', args, {detached: true});
         };
 
-        await expect(agent.launch('sessionId'))
-          .to.be.rejectedWith('xcodebuild failed');
+        await assert.rejects(() => agent.launch('sessionId'), /xcodebuild failed/);
 
         await agent.quit();
       });
     });
   });
 });
-
