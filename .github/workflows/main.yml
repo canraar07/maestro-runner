@@ -1,0 +1,31 @@
+name: Build maestro-runner macOS ARM64
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Build macOS ARM64
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: 0
+        run: |
+          go build -o maestro-runner .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: maestro-runner-darwin-arm64
+          path: maestro-runner
